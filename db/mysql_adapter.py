@@ -325,6 +325,101 @@ class MySqlAdapter:
             raise
 
 
+    def finalize_batch_by_claim(self, claim_id, winner_ids):
+        if not claim_id:
+            return
+
+        cur = self.conn.cursor()
+
+        try:
+            if winner_ids:
+                placeholders = ",".join(["%s"] * len(winner_ids))
+
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE claim_id = %s
+                    AND status = %s
+                    AND job_id IN ({placeholders})
+                    """,
+                    [STATUS_DONE, claim_id, STATUS_RUNNING] + winner_ids
+                )
+
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE claim_id = %s
+                    AND status = %s
+                    AND job_id NOT IN ({placeholders})
+                    """,
+                    [STATUS_SUPERSEDED, claim_id, STATUS_RUNNING] + winner_ids
+                )
+            else:
+                cur.execute("""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE claim_id = %s
+                    AND status = %s
+                """, (STATUS_SUPERSEDED, claim_id, STATUS_RUNNING))
+
+            self.conn.commit()
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def finalize_batch_by_ids(self, job_ids, winner_ids):
+        if not job_ids:
+            return
+
+        winner_ids = set(winner_ids)
+        superseded_ids = sorted(set(job_ids) - winner_ids)
+        winner_ids = sorted(winner_ids)
+
+        cur = self.conn.cursor()
+
+        try:
+            if winner_ids:
+                placeholders = ",".join(["%s"] * len(winner_ids))
+
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE job_id IN ({placeholders})
+                    AND status = %s
+                    """,
+                    [STATUS_DONE] + winner_ids + [STATUS_RUNNING]
+                )
+
+            if superseded_ids:
+                placeholders = ",".join(["%s"] * len(superseded_ids))
+
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE job_id IN ({placeholders})
+                    AND status = %s
+                    """,
+                    [STATUS_SUPERSEDED] + superseded_ids + [STATUS_RUNNING]
+                )
+
+            self.conn.commit()
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
     def release_failed_batch_by_ids(self, job_ids, error_text, delay_seconds=0):
         if not job_ids:
             return 0
@@ -423,15 +518,11 @@ class MySqlAdapter:
         if claim_ids:
             claim_id = claim_ids.pop()
 
-            self.mark_done_by_claim(claim_id, list(winner_ids))
-            self.mark_superseded_by_claim(claim_id, list(winner_ids))
+            self.finalize_batch_by_claim(claim_id, list(winner_ids))
             return
 
         all_ids = [j["job_id"] for j in jobs]
-        superseded_ids = list(set(all_ids) - set(winner_ids))
-
-        self.mark_done(list(winner_ids))
-        self.mark_superseded(superseded_ids)
+        self.finalize_batch_by_ids(all_ids, winner_ids)
 
 
     def fetch_item_document(self, item_id):

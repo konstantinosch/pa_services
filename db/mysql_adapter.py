@@ -472,6 +472,7 @@ class MySqlAdapter:
                 SELECT job_id
                 FROM search_index_jobs
                 WHERE status = %s
+                AND claim_id IS NOT NULL
                 AND started_at < (NOW() - INTERVAL %s SECOND)
                 ORDER BY started_at ASC, job_id ASC
                 LIMIT %s
@@ -499,6 +500,7 @@ class MySqlAdapter:
                     error_text = 'Reaped stale running job'
                 WHERE job_id IN ({placeholders})
                 AND status = %s
+                AND claim_id IS NOT NULL
                 """,
                 [delay_seconds] + job_ids + [STATUS_RUNNING]
             )

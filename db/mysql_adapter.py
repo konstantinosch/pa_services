@@ -50,36 +50,89 @@ class MySqlAdapter:
                     FROM (
                         SELECT job_id
                         FROM search_index_jobs
-                        WHERE status = %s
+                        WHERE (
+                            status = %s
+                            OR (status = %s AND claim_id IS NULL)
+                        )
                         AND available_at <= NOW()
                         ORDER BY priority DESC, created_at ASC, job_id ASC
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
                     ) seed
                 )
-            """, (STATUS_RUNNING, self.worker_id, claim_id, STATUS_PENDING, limit))
+                AND (
+                    status = %s
+                    OR (status = %s AND claim_id IS NULL)
+                )
+            """, (
+                STATUS_RUNNING,
+                self.worker_id,
+                claim_id,
+                STATUS_PENDING,
+                STATUS_RUNNING,
+                limit,
+                STATUS_PENDING,
+                STATUS_RUNNING,
+            ))
 
             if cur.rowcount == 0:
                 self.conn.commit()
                 return []
 
             # 2. Expand claim to all pending jobs for same entities
+            #    Deadlock-friendlier version:
+            #    - read seed entity keys
+            #    - lock matching pending job_ids
+            #    - update by primary key job_id
+
             cur.execute("""
-                UPDATE search_index_jobs j
-                JOIN (
-                    SELECT DISTINCT entity_type, entity_id
+                SELECT DISTINCT entity_type, entity_id
+                FROM search_index_jobs
+                WHERE claim_id = %s
+            """, (claim_id,))
+
+            entity_rows = cur.fetchall()
+
+            extra_job_ids = []
+
+            for entity in entity_rows:
+                cur.execute("""
+                    SELECT job_id
                     FROM search_index_jobs
-                    WHERE claim_id = %s
-                ) seed
-                ON seed.entity_type = j.entity_type
-                AND seed.entity_id = j.entity_id
-                SET j.status = %s,
-                    j.worker_id = %s,
-                    j.claim_id = %s,
-                    j.claimed_at = NOW(),
-                    j.started_at = NOW()
-                WHERE j.status = %s AND available_at <= NOW()
-            """, (claim_id, STATUS_RUNNING, self.worker_id, claim_id, STATUS_PENDING))
+                    WHERE status = %s
+                    AND available_at <= NOW()
+                    AND entity_type = %s
+                    AND entity_id = %s
+                    ORDER BY job_id ASC
+                    FOR UPDATE SKIP LOCKED
+                """, (
+                    STATUS_PENDING,
+                    entity["entity_type"],
+                    entity["entity_id"],
+                ))
+
+                extra_job_ids.extend(r["job_id"] for r in cur.fetchall())
+
+            if extra_job_ids:
+                extra_job_ids = sorted(extra_job_ids)
+                placeholders = ",".join(["%s"] * len(extra_job_ids))
+
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        worker_id = %s,
+                        claim_id = %s,
+                        claimed_at = NOW(),
+                        started_at = NOW()
+                    WHERE job_id IN ({placeholders})
+                    AND (
+                        status = %s
+                        OR (status = %s AND claim_id IS NULL)
+                    )
+                    """,
+                    [STATUS_RUNNING, self.worker_id, claim_id] + extra_job_ids + [STATUS_PENDING, STATUS_RUNNING]
+                )
 
             # 3. Fetch all claimed jobs
             cur.execute("""
@@ -106,12 +159,15 @@ class MySqlAdapter:
             cur.execute("""
                 SELECT job_id, entity_type, entity_id, action, created_at, priority
                 FROM search_index_jobs
-                WHERE status = %s
+                WHERE (
+                    status = %s
+                    OR (status = %s AND claim_id IS NULL)
+                )
                 AND available_at <= NOW()                        
                 ORDER BY priority DESC, created_at ASC, job_id ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
-            """, (STATUS_PENDING, limit))
+            """, (STATUS_PENDING, STATUS_RUNNING, limit))
 
             rows = cur.fetchall()
 
@@ -121,13 +177,23 @@ class MySqlAdapter:
 
             job_ids = [r["job_id"] for r in rows]
 
+            placeholders = ",".join(["%s"] * len(job_ids))
+
             cur.execute(
                 f"""
                 UPDATE search_index_jobs
-                SET status = %s, worker_id = %s, started_at = NOW(), claimed_at = NOW()
-                WHERE job_id IN ({",".join(["%s"] * len(job_ids))})
+                SET status = %s,
+                    worker_id = %s,
+                    claim_id = NULL,
+                    started_at = NOW(),
+                    claimed_at = NOW()
+                WHERE job_id IN ({placeholders})
+                AND (
+                    status = %s
+                    OR (status = %s AND claim_id IS NULL)
+                )
                 """,
-                [STATUS_RUNNING, self.worker_id] + job_ids
+                [STATUS_RUNNING, self.worker_id] + job_ids + [STATUS_PENDING, STATUS_RUNNING]
             )
 
             self.conn.commit()
@@ -414,14 +480,13 @@ class MySqlAdapter:
                 self.conn.commit()
                 return 0
 
-            job_ids = [r["job_id"] for r in rows]
+            job_ids = sorted(r["job_id"] for r in rows)
             placeholders = ",".join(["%s"] * len(job_ids))
 
             cur.execute(
                 f"""
                 UPDATE search_index_jobs
-                SET status = %s,
-                    available_at = NOW() + INTERVAL %s SECOND,
+                SET available_at = NOW() + INTERVAL %s SECOND,
                     claim_id = NULL,
                     worker_id = NULL,
                     claimed_at = NULL,
@@ -431,7 +496,7 @@ class MySqlAdapter:
                 WHERE job_id IN ({placeholders})
                 AND status = %s
                 """,
-                [STATUS_PENDING] + [delay_seconds] + job_ids + [STATUS_RUNNING]
+                [delay_seconds] + job_ids + [STATUS_RUNNING]
             )
 
             count = cur.rowcount

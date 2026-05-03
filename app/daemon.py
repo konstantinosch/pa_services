@@ -3,14 +3,9 @@
 # ============================================================
 #
 # - Jobs are claimed using FOR UPDATE SKIP LOCKED
-# - Status transitions: P → R → (D | F)
+# - Status transitions: P → R → (D | S | F)
 # - Jobs are processed in batches and compressed per (entity_type, entity_id)
 # - Latest job (by created_at, job_id) wins per entity
-#
-# IMPORTANT:
-# - entity_state table holds latest processed state per entity
-# - freshness guard prevents stale jobs from overwriting newer results
-# - document_hash avoids unnecessary re-indexing
 #
 # FUTURE CONSISTENCY MODEL:
 # - entity_state will hold latest processed state per (entity_type, entity_id)
@@ -20,21 +15,26 @@
 # ============================================================
 
 import os
-import time
 import signal
 import threading
 import logging
 from db.factory import create_adapter
 from db.base import ACTION_INSERT, ACTION_UPDATE, ACTION_DELETE
-from app.config import POLL_INTERVAL_SECONDS, JOB_BATCH_SIZE, BATCH_DELAY_SECONDS, LOG_LEVEL, LOG_FILE
+from app.config import (
+    LOG_LEVEL, 
+    LOG_FILE,
+    DAEMON_POLL_INTERVAL_SECONDS,
+    DAEMON_BATCH_SIZE,
+    DAEMON_BATCH_DELAY_SECONDS, 
+)
+
 
 shutdown_event = threading.Event()
 
 
 def handle_shutdown(signum, frame):
-    print("\nShutdown requested...")
+    logging.info("Shutdown requested...")
     shutdown_event.set()
-
 
 
 def setup_logging():
@@ -110,20 +110,20 @@ def process_job(db, job):
     action = job["action"]
 
     if entity_type != "item":
-        print(f"Skipping unsupported entity type: {entity_type}")
+        logging.info("Skipping unsupported entity type: %s", entity_type)
         return
 
     if action in (ACTION_INSERT, ACTION_UPDATE):
         doc = db.fetch_item_document(entity_id)
 
         if doc is None:
-            print(f"Item {entity_id} no longer exists, would delete from index")
+            logging.info("Item %s no longer exists, would delete from index", entity_id)
             return
 
         logging.debug("Would upsert document: %s", doc)
 
     elif action == ACTION_DELETE:
-        print(f"Would delete item {entity_id} from index")
+        logging.info("Would delete item %s from index", entity_id)
 
     else:
         raise RuntimeError(f"Unknown action: {action}")
@@ -141,26 +141,27 @@ def main():
     db.log_config()
 
     while not shutdown_event.is_set():
+        jobs = []
         try:
-            jobs = db.fetch_jobs(limit=JOB_BATCH_SIZE)
+            jobs = db.fetch_jobs(limit=DAEMON_BATCH_SIZE)
 
             if not jobs:
-                shutdown_event.wait(POLL_INTERVAL_SECONDS)
+                shutdown_event.wait(DAEMON_POLL_INTERVAL_SECONDS)
                 continue
 
             collapsed = collapse_jobs(jobs)
 
             winner_ids = {j["job_id"] for j in collapsed}
-            all_ids = {j["job_id"] for j in jobs}
-            superseded_ids = list(all_ids - winner_ids)
 
-            eff = len(collapsed) / len(jobs)
+            ratio = len(collapsed) / len(jobs)
+            saved = len(jobs) - len(collapsed)
+
             logging.info(
                 "Fetched %d jobs → collapsed %d entities (saved %d, ratio %.5f)",
                 len(jobs),
                 len(collapsed),
-                len(jobs) - len(collapsed),
-                len(collapsed) / len(jobs),
+                saved,
+                ratio,
             )
             logging.debug("Raw jobs: %s", jobs)
             logging.debug("Collapsed jobs: %s", collapsed)
@@ -174,17 +175,17 @@ def main():
             if not shutdown_event.is_set():
                 db.finalize_batch(jobs, winner_ids)
 
-            if BATCH_DELAY_SECONDS > 0:
-                shutdown_event.wait(BATCH_DELAY_SECONDS)
+            if DAEMON_BATCH_DELAY_SECONDS > 0:
+                shutdown_event.wait(DAEMON_BATCH_DELAY_SECONDS)
 
         except Exception as e:
             logging.exception("Fatal error while processing batch. Shutting down.")
 
             try:
-                if "jobs" in locals() and jobs:
-                    db.mark_failed_many([j["job_id"] for j in jobs], str(e))
+                released_count = db.release_failed_batch(jobs, str(e))
+                logging.error("Released batch back to pending: %d jobs", released_count)
             except Exception:
-                logging.exception("Could not mark jobs as failed.")
+                logging.exception("Failed to release batch")
 
             shutdown_event.set()
             break

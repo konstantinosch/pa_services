@@ -23,11 +23,17 @@ class DbAdapter:
     def fetch_jobs(self, limit: int):
         raise NotImplementedError
 
-    def mark_done(self, job_ids):
+    def finalize_batch(self, jobs, winner_ids):
         raise NotImplementedError
 
-    def mark_failed(self, job_id, error_text: str):
+    def release_failed_batch(self, jobs, error_text: str):
         raise NotImplementedError
 
     def fetch_item_document(self, item_id: str):
+        raise NotImplementedError
+
+    def reap_stale_jobs(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
+        raise NotImplementedError
+
+    def log_config(self):
         raise NotImplementedError

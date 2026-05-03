@@ -2,7 +2,9 @@ import os
 import socket
 import mysql.connector
 import uuid
-from db.base import STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_SUPERSEDED, STATUS_FAILED
+import logging
+
+from db.base import STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_SUPERSEDED
 
 
 class MySqlAdapter:
@@ -14,7 +16,11 @@ class MySqlAdapter:
 
 
     def log_config(self):
-        print(f"[MySQL Adapter] Using claim strategy: {self.claim_strategy}")
+        logging.info(
+            "[MySQL Adapter] claim_strategy=%s worker_id=%s",
+            self.claim_strategy,
+            self.worker_id,
+        )
 
 
     def fetch_jobs_expanded(self, limit=100):
@@ -45,6 +51,7 @@ class MySqlAdapter:
                         SELECT job_id
                         FROM search_index_jobs
                         WHERE status = %s
+                        AND available_at <= NOW()
                         ORDER BY priority DESC, created_at ASC, job_id ASC
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
@@ -71,7 +78,7 @@ class MySqlAdapter:
                     j.claim_id = %s,
                     j.claimed_at = NOW(),
                     j.started_at = NOW()
-                WHERE j.status = %s
+                WHERE j.status = %s AND available_at <= NOW()
             """, (claim_id, STATUS_RUNNING, self.worker_id, claim_id, STATUS_PENDING))
 
             # 3. Fetch all claimed jobs
@@ -100,6 +107,7 @@ class MySqlAdapter:
                 SELECT job_id, entity_type, entity_id, action, created_at, priority
                 FROM search_index_jobs
                 WHERE status = %s
+                AND available_at <= NOW()                        
                 ORDER BY priority DESC, created_at ASC, job_id ASC
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
@@ -116,10 +124,10 @@ class MySqlAdapter:
             cur.execute(
                 f"""
                 UPDATE search_index_jobs
-                SET status = %s, started_at = NOW()
+                SET status = %s, worker_id = %s, started_at = NOW(), claimed_at = NOW()
                 WHERE job_id IN ({",".join(["%s"] * len(job_ids))})
                 """,
-                [STATUS_RUNNING] + job_ids
+                [STATUS_RUNNING, self.worker_id] + job_ids
             )
 
             self.conn.commit()
@@ -247,9 +255,9 @@ class MySqlAdapter:
             raise
 
 
-    def mark_failed_many(self, job_ids, error_text):
+    def release_failed_batch_by_ids(self, job_ids, error_text):
         if not job_ids:
-            return
+            return 0
 
         cur = self.conn.cursor()
         placeholders = ",".join(["%s"] * len(job_ids))
@@ -259,23 +267,77 @@ class MySqlAdapter:
                 f"""
                 UPDATE search_index_jobs
                 SET status = %s,
-                    finished_at = NOW(),
+                    claim_id = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
                     retry_count = retry_count + 1,
                     error_text = %s
                 WHERE job_id IN ({placeholders})
+                AND status = %s
                 """,
-                [STATUS_FAILED, error_text[:1000]] + job_ids
+                [STATUS_PENDING, error_text[:1000]] + job_ids + [STATUS_RUNNING]
             )
 
+            released_count = cur.rowcount
             self.conn.commit()
+            return released_count
 
         except Exception:
             self.conn.rollback()
             raise
 
 
-    def mark_failed(self, job_id, error_text):
-        self.mark_failed_many([job_id], error_text)
+    def release_failed_batch_by_claim(self, claim_id, error_text):
+        if not claim_id:
+            return 0
+
+        cur = self.conn.cursor()
+
+        try:
+            cur.execute("""
+                UPDATE search_index_jobs
+                SET status = %s,
+                    claim_id = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
+                    retry_count = retry_count + 1,
+                    error_text = %s
+                WHERE claim_id = %s
+                AND status = %s
+            """, (
+                STATUS_PENDING,
+                error_text[:1000],
+                claim_id,
+                STATUS_RUNNING,
+            ))
+
+            released_count = cur.rowcount
+            self.conn.commit()
+            return released_count
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def release_failed_batch(self, jobs, error_text):
+        if not jobs:
+            return 0
+
+        if self.claim_strategy == "expanded":
+            claim_ids = {j["claim_id"] for j in jobs}
+
+            if len(claim_ids) != 1:
+                raise RuntimeError("Batch contains multiple claim_id values")
+
+            claim_id = claim_ids.pop()
+            return self.release_failed_batch_by_claim(claim_id, error_text)
+
+        else:
+            job_ids = [j["job_id"] for j in jobs]
+            return self.release_failed_batch_by_ids(job_ids, error_text)
 
 
     def finalize_batch(self, jobs, winner_ids):
@@ -283,7 +345,13 @@ class MySqlAdapter:
             return
 
         if self.claim_strategy == "expanded":
-            claim_id = jobs[0]["claim_id"]
+
+            claim_ids = {j["claim_id"] for j in jobs}
+
+            if len(claim_ids) != 1:
+                raise RuntimeError("Batch contains multiple claim_id values")
+
+            claim_id = claim_ids.pop()            
 
             self.mark_done_by_claim(claim_id, list(winner_ids))
             self.mark_superseded_by_claim(claim_id, list(winner_ids))
@@ -306,6 +374,7 @@ class MySqlAdapter:
             """, (item_id,))
 
             row = cur.fetchone()
+            self.conn.commit()
 
             if not row:
                 return None
@@ -323,3 +392,52 @@ class MySqlAdapter:
         except Exception:
             self.conn.rollback()
             raise          
+
+
+    def reap_stale_jobs(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
+        cur = self.conn.cursor(dictionary=True)
+
+        try:
+            cur.execute("""
+                SELECT job_id
+                FROM search_index_jobs
+                WHERE status = %s
+                AND started_at < (NOW() - INTERVAL %s SECOND)
+                ORDER BY started_at ASC, job_id ASC
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            """, (STATUS_RUNNING, stale_seconds, limit))
+
+            rows = cur.fetchall()
+
+            if not rows:
+                self.conn.commit()
+                return 0
+
+            job_ids = [r["job_id"] for r in rows]
+            placeholders = ",".join(["%s"] * len(job_ids))
+
+            cur.execute(
+                f"""
+                UPDATE search_index_jobs
+                SET status = %s,
+                    available_at = NOW() + INTERVAL %s SECOND,
+                    claim_id = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
+                    reap_count = reap_count + 1,
+                    error_text = 'Reaped stale running job'
+                WHERE job_id IN ({placeholders})
+                AND status = %s
+                """,
+                [STATUS_PENDING] + [delay_seconds] + job_ids + [STATUS_RUNNING]
+            )
+
+            count = cur.rowcount
+            self.conn.commit()
+            return count
+
+        except Exception:
+            self.conn.rollback()
+            raise

@@ -1,0 +1,96 @@
+import logging
+import os
+import signal
+import threading
+
+from app.config import (
+    LOG_LEVEL,
+    LOG_FILE,
+    REAPER_POLL_INTERVAL_SECONDS,
+    REAPER_STALE_SECONDS,
+    REAPER_BATCH_SIZE,
+    REAPER_BATCH_DELAY_SECONDS,
+    REAPER_RELEASE_DELAY_SECONDS
+)
+
+from db.factory import create_adapter
+
+
+shutdown_event = threading.Event()
+
+
+def setup_logging():
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(LOG_FILE),
+        ],
+    )
+
+
+def handle_shutdown(signum, frame):
+    logging.info("Shutdown requested")
+    shutdown_event.set()
+
+
+def main():
+    setup_logging()
+
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+
+    db = create_adapter()
+    db.log_config()
+
+    logging.info(
+        "Reaper started: interval=%ss stale=%ss batch_size=%s",
+        REAPER_POLL_INTERVAL_SECONDS,
+        REAPER_STALE_SECONDS,
+        REAPER_BATCH_SIZE,
+    )
+
+    while not shutdown_event.is_set():
+        total_reaped = 0
+        reaped_count = 0
+
+        try:
+            while not shutdown_event.is_set():
+                reaped_count = db.reap_stale_jobs(
+                    REAPER_STALE_SECONDS,
+                    REAPER_RELEASE_DELAY_SECONDS,
+                    REAPER_BATCH_SIZE,
+                )
+                if reaped_count == 0:
+                    break
+
+                total_reaped += reaped_count
+
+                logging.warning("Reaper batch requeued stale jobs: reaped=%d", reaped_count)
+
+                if REAPER_BATCH_DELAY_SECONDS > 0:
+                    shutdown_event.wait(REAPER_BATCH_DELAY_SECONDS)
+
+            if total_reaped:
+                logging.warning(
+                    "Reaper cycle complete: total_reaped=%d",
+                    total_reaped,
+                )
+            else:
+                logging.debug("Reaper found no stale jobs")
+
+        except Exception:
+            logging.exception("Fatal reaper error. Shutting down.")
+            shutdown_event.set()
+            break
+
+        shutdown_event.wait(REAPER_POLL_INTERVAL_SECONDS)
+
+    logging.info("Reaper stopped cleanly")
+
+
+if __name__ == "__main__":
+    main()

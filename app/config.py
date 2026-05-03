@@ -3,13 +3,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_ENGINE = os.getenv("DB_ENGINE", "mysql")
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "2"))
-BATCH_DELAY_SECONDS = float(os.getenv("BATCH_DELAY_SECONDS", "2"))
-JOB_BATCH_SIZE = int(os.getenv("JOB_BATCH_SIZE", "100"))
-CLAIM_STRATEGY = os.getenv("CLAIM_STRATEGY", "simple")
+DAEMON_POLL_INTERVAL_SECONDS = float(os.getenv("DAEMON_POLL_INTERVAL_SECONDS", "2"))
+DAEMON_BATCH_DELAY_SECONDS = float(os.getenv("DAEMON_BATCH_DELAY_SECONDS", "0"))
+DAEMON_BATCH_SIZE = int(os.getenv("DAEMON_BATCH_SIZE", "100"))
+DAEMON_CLAIM_STRATEGY = os.getenv("DAEMON_CLAIM_STRATEGY", "simple")
+
+REAPER_POLL_INTERVAL_SECONDS = float(os.getenv("REAPER_POLL_INTERVAL_SECONDS", "60"))
+REAPER_BATCH_DELAY_SECONDS = float(os.getenv("REAPER_BATCH_DELAY_SECONDS", "0.5"))
+REAPER_BATCH_SIZE = int(os.getenv("REAPER_BATCH_SIZE", "1000"))
+REAPER_STALE_SECONDS = int(os.getenv("REAPER_STALE_SECONDS", "600"))
+REAPER_RELEASE_DELAY_SECONDS = int(os.getenv("REAPER_RELEASE_DELAY_SECONDS", "600"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = os.getenv("LOG_FILE", "logs/indexer.log")
+
+DB_ENGINE = os.getenv("DB_ENGINE", "mysql")
 
 MYSQL_CONFIG = {
     "host": os.getenv("MYSQL_HOST", "localhost"),

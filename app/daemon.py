@@ -26,6 +26,7 @@ from app.config import (
     DAEMON_POLL_INTERVAL_SECONDS,
     DAEMON_BATCH_SIZE,
     DAEMON_BATCH_DELAY_SECONDS, 
+    DAEMON_RETRY_DELAY_SECONDS,
 )
 
 
@@ -182,8 +183,16 @@ def main():
             logging.exception("Fatal error while processing batch. Shutting down.")
 
             try:
-                released_count = db.release_failed_batch(jobs, str(e))
-                logging.error("Released batch back to pending: %d jobs", released_count)
+                released_count = db.release_failed_batch(
+                    jobs,
+                    str(e),
+                    DAEMON_RETRY_DELAY_SECONDS,
+                )
+                logging.error(
+                    "Released failed batch ownership: jobs=%d retry_delay=%ss",
+                    released_count,
+                    DAEMON_RETRY_DELAY_SECONDS,
+                )
             except Exception:
                 logging.exception("Failed to release batch")
 

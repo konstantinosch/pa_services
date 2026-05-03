@@ -26,7 +26,7 @@ class DbAdapter:
     def finalize_batch(self, jobs, winner_ids):
         raise NotImplementedError
 
-    def release_failed_batch(self, jobs, error_text: str):
+    def release_failed_batch(self, jobs, error_text: str, delay_seconds: int = 0):
         raise NotImplementedError
 
     def fetch_item_document(self, item_id: str):

@@ -325,7 +325,7 @@ class MySqlAdapter:
             raise
 
 
-    def release_failed_batch_by_ids(self, job_ids, error_text):
+    def release_failed_batch_by_ids(self, job_ids, error_text, delay_seconds=0):
         if not job_ids:
             return 0
 
@@ -336,7 +336,7 @@ class MySqlAdapter:
             cur.execute(
                 f"""
                 UPDATE search_index_jobs
-                SET status = %s,
+                SET available_at = NOW() + INTERVAL %s SECOND,
                     claim_id = NULL,
                     worker_id = NULL,
                     claimed_at = NULL,
@@ -346,7 +346,7 @@ class MySqlAdapter:
                 WHERE job_id IN ({placeholders})
                 AND status = %s
                 """,
-                [STATUS_PENDING, error_text[:1000]] + job_ids + [STATUS_RUNNING]
+                [delay_seconds, error_text[:1000]] + job_ids + [STATUS_RUNNING]
             )
 
             released_count = cur.rowcount
@@ -358,7 +358,7 @@ class MySqlAdapter:
             raise
 
 
-    def release_failed_batch_by_claim(self, claim_id, error_text):
+    def release_failed_batch_by_claim(self, claim_id, error_text, delay_seconds=0):
         if not claim_id:
             return 0
 
@@ -367,7 +367,7 @@ class MySqlAdapter:
         try:
             cur.execute("""
                 UPDATE search_index_jobs
-                SET status = %s,
+                SET available_at = NOW() + INTERVAL %s SECOND,
                     claim_id = NULL,
                     worker_id = NULL,
                     claimed_at = NULL,
@@ -377,7 +377,7 @@ class MySqlAdapter:
                 WHERE claim_id = %s
                 AND status = %s
             """, (
-                STATUS_PENDING,
+                delay_seconds,
                 error_text[:1000],
                 claim_id,
                 STATUS_RUNNING,
@@ -392,7 +392,7 @@ class MySqlAdapter:
             raise
 
 
-    def release_failed_batch(self, jobs, error_text):
+    def release_failed_batch(self, jobs, error_text, delay_seconds=0):
         if not jobs:
             return 0
 
@@ -404,10 +404,10 @@ class MySqlAdapter:
 
         if claim_ids:
             claim_id = claim_ids.pop()
-            return self.release_failed_batch_by_claim(claim_id, error_text)
+            return self.release_failed_batch_by_claim(claim_id, error_text, delay_seconds)
 
         job_ids = [j["job_id"] for j in jobs]
-        return self.release_failed_batch_by_ids(job_ids, error_text)
+        return self.release_failed_batch_by_ids(job_ids, error_text, delay_seconds)
 
 
     def finalize_batch(self, jobs, winner_ids):

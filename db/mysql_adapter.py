@@ -154,10 +154,11 @@ class MySqlAdapter:
 
 
     def fetch_jobs_simple(self, limit=100):
+        claim_id = str(uuid.uuid4())
         cur = self.conn.cursor(dictionary=True)
         try:
             cur.execute("""
-                SELECT job_id, entity_type, entity_id, action, created_at, priority
+                SELECT job_id, entity_type, entity_id, action, created_at, priority, source
                 FROM search_index_jobs
                 WHERE (
                     status = %s
@@ -184,7 +185,7 @@ class MySqlAdapter:
                 UPDATE search_index_jobs
                 SET status = %s,
                     worker_id = %s,
-                    claim_id = NULL,
+                    claim_id = %s,
                     started_at = NOW(),
                     claimed_at = NOW()
                 WHERE job_id IN ({placeholders})
@@ -193,8 +194,11 @@ class MySqlAdapter:
                     OR (status = %s AND claim_id IS NULL)
                 )
                 """,
-                [STATUS_RUNNING, self.worker_id] + job_ids + [STATUS_PENDING, STATUS_RUNNING]
+                [STATUS_RUNNING, self.worker_id, claim_id] + job_ids + [STATUS_PENDING, STATUS_RUNNING]
             )
+
+            for row in rows:
+                row["claim_id"] = claim_id
 
             self.conn.commit()
             return rows
@@ -392,42 +396,42 @@ class MySqlAdapter:
         if not jobs:
             return 0
 
-        if self.claim_strategy == "expanded":
-            claim_ids = {j["claim_id"] for j in jobs}
+        raw_claim_ids = {j.get("claim_id") for j in jobs}
+        claim_ids = {claim_id for claim_id in raw_claim_ids if claim_id}
 
-            if len(claim_ids) != 1:
-                raise RuntimeError("Batch contains multiple claim_id values")
+        if len(claim_ids) > 1 or (claim_ids and None in raw_claim_ids):
+            raise RuntimeError("Batch contains multiple claim_id values")
 
+        if claim_ids:
             claim_id = claim_ids.pop()
             return self.release_failed_batch_by_claim(claim_id, error_text)
 
-        else:
-            job_ids = [j["job_id"] for j in jobs]
-            return self.release_failed_batch_by_ids(job_ids, error_text)
+        job_ids = [j["job_id"] for j in jobs]
+        return self.release_failed_batch_by_ids(job_ids, error_text)
 
 
     def finalize_batch(self, jobs, winner_ids):
         if not jobs:
             return
 
-        if self.claim_strategy == "expanded":
+        raw_claim_ids = {j.get("claim_id") for j in jobs}
+        claim_ids = {claim_id for claim_id in raw_claim_ids if claim_id}
 
-            claim_ids = {j["claim_id"] for j in jobs}
+        if len(claim_ids) > 1 or (claim_ids and None in raw_claim_ids):
+            raise RuntimeError("Batch contains multiple claim_id values")
 
-            if len(claim_ids) != 1:
-                raise RuntimeError("Batch contains multiple claim_id values")
-
-            claim_id = claim_ids.pop()            
+        if claim_ids:
+            claim_id = claim_ids.pop()
 
             self.mark_done_by_claim(claim_id, list(winner_ids))
             self.mark_superseded_by_claim(claim_id, list(winner_ids))
+            return
 
-        else:
-            all_ids = [j["job_id"] for j in jobs]
-            superseded_ids = list(set(all_ids) - set(winner_ids))
+        all_ids = [j["job_id"] for j in jobs]
+        superseded_ids = list(set(all_ids) - set(winner_ids))
 
-            self.mark_done(list(winner_ids))
-            self.mark_superseded(superseded_ids)
+        self.mark_done(list(winner_ids))
+        self.mark_superseded(superseded_ids)
 
 
     def fetch_item_document(self, item_id):

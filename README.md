@@ -1,10 +1,16 @@
 # Feed RAM Refresh
 
-Small operational wrapper for feed RAM/read-model refresh jobs.
+Operational service for refreshing the feed RAM read models used by the PHP
+feed endpoint.
 
-This folder is the home for the next RAM phase. Existing SQL under
-`sql_components/` is intentionally left unchanged until the refresh bodies are
-moved here.
+The service maintains two bounded MySQL MEMORY tables:
+
+- `ram_campaign_actions`: compact feed-selection rows for recent visible actions.
+- `ram_hydrated_actions`: hydrated post/campaign payload rows keyed by action index.
+
+Each refresh writes coverage metadata to `ram_state`, allowing the PHP runtime
+to use RAM only when the requested window is covered and fall back to live SQL
+otherwise.
 
 ## Files
 
@@ -15,7 +21,7 @@ moved here.
 - `sql/refresh_campaign_actions.sql`: runnable `ram_campaign_actions` refresh.
 - `sql/refresh_hydrated_actions.sql`: runnable `ram_hydrated_actions` refresh.
 
-## Planned Commands
+## Commands
 
 ```bash
 /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh help

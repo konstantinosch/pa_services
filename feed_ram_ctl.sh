@@ -29,6 +29,7 @@ FEED_RAM_HYDRATED_ACTIONS_CRON="${FEED_RAM_HYDRATED_ACTIONS_CRON:-*/5 * * * *}"
 MARKER_PREFIX="praxi_agapis_feed"
 MARKER_CAMPAIGN_ACTIONS="# ${MARKER_PREFIX}:campaign_actions"
 MARKER_HYDRATED_ACTIONS="# ${MARKER_PREFIX}:hydrated_actions"
+LOGROTATE_FILE="${FEED_RAM_LOGROTATE_FILE:-/etc/logrotate.d/pa-feed-ram-refresh}"
 
 log_timestamp() {
   date '+%Y-%m-%d %H:%M:%S %z'
@@ -54,6 +55,9 @@ Usage:
   /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh install-cron campaign_actions|hydrated_actions|all
   /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh uninstall-cron campaign_actions|hydrated_actions|all
   /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh show-cron
+  /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh install-logrotate
+  /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh uninstall-logrotate
+  /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh show-logrotate
 
 Configuration:
   Edit config.env in the service directory.
@@ -62,6 +66,9 @@ Configuration:
 Cron markers live on the managed cron line:
   # praxi_agapis_feed:campaign_actions
   # praxi_agapis_feed:hydrated_actions
+
+Logrotate is installed to:
+  /etc/logrotate.d/pa-feed-ram-refresh
 USAGE
 }
 
@@ -591,6 +598,66 @@ show_cron() {
   current_cron | grep -F "# ${MARKER_PREFIX}:" || true
 }
 
+service_owner() {
+  stat -c '%U' "${SERVICE_DIR}"
+}
+
+service_group() {
+  stat -c '%G' "${SERVICE_DIR}"
+}
+
+logrotate_content() {
+  local owner
+  local group
+
+  owner="$(service_owner)"
+  group="$(service_group)"
+
+  cat <<EOF
+$(service_log_dir)/*.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+    copytruncate
+    su ${owner} ${group}
+}
+EOF
+}
+
+install_logrotate() {
+  validate_config
+  ensure_log_dir
+
+  log_info "Installing logrotate config: ${LOGROTATE_FILE}"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    logrotate_content > "${LOGROTATE_FILE}"
+    chmod 644 "${LOGROTATE_FILE}"
+  else
+    logrotate_content | sudo tee "${LOGROTATE_FILE}" >/dev/null
+    sudo chmod 644 "${LOGROTATE_FILE}"
+  fi
+}
+
+uninstall_logrotate() {
+  log_info "Uninstalling logrotate config: ${LOGROTATE_FILE}"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    rm -f "${LOGROTATE_FILE}"
+  else
+    sudo rm -f "${LOGROTATE_FILE}"
+  fi
+}
+
+show_logrotate() {
+  if [[ -f "${LOGROTATE_FILE}" ]]; then
+    cat "${LOGROTATE_FILE}"
+    return
+  fi
+
+  logrotate_content
+}
+
 main() {
   local command="${1:-help}"
   local model="${2:-}"
@@ -626,6 +693,15 @@ main() {
       ;;
     show-cron)
       show_cron
+      ;;
+    install-logrotate)
+      install_logrotate
+      ;;
+    uninstall-logrotate)
+      uninstall_logrotate
+      ;;
+    show-logrotate)
+      show_logrotate
       ;;
     *)
       log_error "Unknown command: ${command}"

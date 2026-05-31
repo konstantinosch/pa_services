@@ -45,6 +45,9 @@ otherwise.
 /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh uninstall-cron hydrated_actions
 /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh uninstall-cron all
 /opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh show-cron
+/opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh install-logrotate
+/opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh uninstall-logrotate
+/opt/pa_services/feed-ram-refresh/feed_ram_ctl.sh show-logrotate
 ```
 
 ## Refresh Flow
@@ -124,6 +127,14 @@ release, and drop actions:
 
 MySQL warnings and errors still pass through stderr/stdout so failed refreshes
 keep their SQL context in the same log file.
+
+`install-logrotate` writes `/etc/logrotate.d/pa-feed-ram-refresh`. The generated
+rule rotates `logs/*.log` daily, keeps 14 compressed rotations, skips empty or
+missing logs, and uses `copytruncate` so cron can keep appending without a
+restart. The `su` user/group are derived from the service directory owner.
+
+Use `show-logrotate` to preview the active or generated rule, and
+`uninstall-logrotate` to remove the managed file.
 
 ## Cron Markers
 

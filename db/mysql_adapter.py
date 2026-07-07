@@ -3,27 +3,88 @@ import socket
 import mysql.connector
 import uuid
 import logging
+import random
+import time
 
 from db.base import STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_SUPERSEDED
 
 
+MYSQL_ERR_LOCK_WAIT_TIMEOUT = 1205
+MYSQL_ERR_DEADLOCK = 1213
+
+
 class MySqlAdapter:
-    def __init__(self, config, claim_strategy="simple"):
+    RETRYABLE_ERRNOS = {
+        MYSQL_ERR_LOCK_WAIT_TIMEOUT,
+        MYSQL_ERR_DEADLOCK,
+    }
+
+    def __init__(
+        self,
+        config,
+        claim_strategy="simple",
+        retry_attempts=3,
+        retry_base_delay_seconds=0.1,
+        retry_max_delay_seconds=2,
+    ):
         self.conn = mysql.connector.connect(**config)
         self.conn.autocommit = False
         self.claim_strategy = claim_strategy
         self.worker_id = f"{socket.gethostname()}-{os.getpid()}"
+        self.retry_attempts = max(1, retry_attempts)
+        self.retry_base_delay_seconds = max(0, retry_base_delay_seconds)
+        self.retry_max_delay_seconds = max(0, retry_max_delay_seconds)
 
 
     def log_config(self):
         logging.info(
-            "[MySQL Adapter] claim_strategy=%s worker_id=%s",
+            "[MySQL Adapter] claim_strategy=%s worker_id=%s db_retry_attempts=%s",
             self.claim_strategy,
             self.worker_id,
+            self.retry_attempts,
         )
 
 
-    def fetch_jobs_expanded(self, limit=100):
+    def is_retryable_error(self, error):
+        return (
+            isinstance(error, mysql.connector.Error)
+            and error.errno in self.RETRYABLE_ERRNOS
+        )
+
+
+    def retry_delay(self, attempt):
+        if self.retry_base_delay_seconds <= 0:
+            return 0
+
+        delay = self.retry_base_delay_seconds * (2 ** (attempt - 1))
+        delay = min(delay, self.retry_max_delay_seconds)
+        jitter = random.uniform(0, delay * 0.25)
+        return delay + jitter
+
+
+    def with_db_retry(self, operation_name, operation):
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                return operation()
+            except Exception as error:
+                if not self.is_retryable_error(error) or attempt >= self.retry_attempts:
+                    raise
+
+                delay = self.retry_delay(attempt)
+                logging.warning(
+                    "Retryable MySQL error during %s: errno=%s attempt=%s/%s delay=%.3fs",
+                    operation_name,
+                    getattr(error, "errno", None),
+                    attempt,
+                    self.retry_attempts,
+                    delay,
+                )
+
+                if delay > 0:
+                    time.sleep(delay)
+
+
+    def fetch_jobs_expanded_once(self, limit=100):
         """
         Advanced claim strategy.
 
@@ -153,7 +214,7 @@ class MySqlAdapter:
             raise
 
 
-    def fetch_jobs_simple(self, limit=100):
+    def fetch_jobs_simple_once(self, limit=100):
         claim_id = str(uuid.uuid4())
         cur = self.conn.cursor(dictionary=True)
         try:
@@ -210,9 +271,15 @@ class MySqlAdapter:
 
     def fetch_jobs(self, limit=100):
         if self.claim_strategy == "expanded":
-            return self.fetch_jobs_expanded(limit)
+            return self.with_db_retry(
+                "fetch_jobs_expanded",
+                lambda: self.fetch_jobs_expanded_once(limit),
+            )
 
-        return self.fetch_jobs_simple(limit)
+        return self.with_db_retry(
+            "fetch_jobs_simple",
+            lambda: self.fetch_jobs_simple_once(limit),
+        )
 
 
     def mark_superseded(self, job_ids):
@@ -487,7 +554,7 @@ class MySqlAdapter:
             raise
 
 
-    def release_failed_batch(self, jobs, error_text, delay_seconds=0):
+    def release_failed_batch_once(self, jobs, error_text, delay_seconds=0):
         if not jobs:
             return 0
 
@@ -505,7 +572,14 @@ class MySqlAdapter:
         return self.release_failed_batch_by_ids(job_ids, error_text, delay_seconds)
 
 
-    def finalize_batch(self, jobs, winner_ids):
+    def release_failed_batch(self, jobs, error_text, delay_seconds=0):
+        return self.with_db_retry(
+            "release_failed_batch",
+            lambda: self.release_failed_batch_once(jobs, error_text, delay_seconds),
+        )
+
+
+    def finalize_batch_once(self, jobs, winner_ids):
         if not jobs:
             return
 
@@ -523,6 +597,13 @@ class MySqlAdapter:
 
         all_ids = [j["job_id"] for j in jobs]
         self.finalize_batch_by_ids(all_ids, winner_ids)
+
+
+    def finalize_batch(self, jobs, winner_ids):
+        return self.with_db_retry(
+            "finalize_batch",
+            lambda: self.finalize_batch_once(jobs, winner_ids),
+        )
 
 
     def fetch_item_document(self, item_id):
@@ -555,7 +636,7 @@ class MySqlAdapter:
             raise          
 
 
-    def reap_stale_jobs(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
+    def reap_stale_jobs_once(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
         cur = self.conn.cursor(dictionary=True)
 
         try:
@@ -603,3 +684,10 @@ class MySqlAdapter:
         except Exception:
             self.conn.rollback()
             raise
+
+
+    def reap_stale_jobs(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
+        return self.with_db_retry(
+            "reap_stale_jobs",
+            lambda: self.reap_stale_jobs_once(stale_seconds, delay_seconds, limit),
+        )

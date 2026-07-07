@@ -1,11 +1,11 @@
 import logging
-import os
 import signal
 import threading
 
 from app.config import (
     LOG_LEVEL,
     LOG_FILE,
+    ensure_log_directory,
     REAPER_POLL_INTERVAL_SECONDS,
     REAPER_STALE_SECONDS,
     REAPER_BATCH_SIZE,
@@ -20,7 +20,7 @@ shutdown_event = threading.Event()
 
 
 def setup_logging():
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    ensure_log_directory()
 
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),

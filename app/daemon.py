@@ -14,7 +14,6 @@
 #
 # ============================================================
 
-import os
 import signal
 import threading
 import logging
@@ -23,6 +22,7 @@ from db.base import ACTION_INSERT, ACTION_UPDATE, ACTION_DELETE
 from app.config import (
     LOG_LEVEL, 
     LOG_FILE,
+    ensure_log_directory,
     DAEMON_POLL_INTERVAL_SECONDS,
     DAEMON_BATCH_SIZE,
     DAEMON_BATCH_DELAY_SECONDS, 
@@ -39,7 +39,7 @@ def handle_shutdown(signum, frame):
 
 
 def setup_logging():
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    ensure_log_directory()
 
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),

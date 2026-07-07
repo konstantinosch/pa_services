@@ -1,16 +1,11 @@
-# ACTION VALUES:
-# I = Insert  -> new entity -> index document
-# U = Update  -> existing entity changed -> re-index full document
-# D = Delete  -> entity removed -> delete from index
-#
+# ACTION VALUES
+ACTION_INSERT = "I" # Insert  -> new entity -> index document
+ACTION_UPDATE = "U" # Update  -> existing entity changed -> re-index full document
+ACTION_DELETE = "D" # Delete  -> entity removed -> delete from index
 # Note:
 # - I and U are treated the same in practice: UPSERT
 # - D means remove document from search engine
 
-# ACTION VALUES
-ACTION_INSERT = "I"
-ACTION_UPDATE = "U"
-ACTION_DELETE = "D"
 
 # JOB STATUS VALUES
 STATUS_PENDING = "P"

@@ -5,3 +5,5 @@
 **/*.py[cod]
 **/.env
 **/tmp/
+mysql.cnf
+logs/*.log

@@ -1,0 +1,7 @@
+# pa_services local runtime artifacts
+**/logs/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/tmp/

@@ -34,12 +34,12 @@ DB_ENGINE="${DB_ENGINE:-mysql}"
 MYSQL_HOST="${MYSQL_HOST:-localhost}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_USER="${MYSQL_USER:-pa_indexer}"
-MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-Pa_Indexer_2026!ChangeMe}"
 MYSQL_DATABASE="${MYSQL_DATABASE:-pa_opensearch_indexer}"
 MYSQL_APP_HOST="${MYSQL_APP_HOST:-localhost}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
-MYSQL_ADMIN_BIN="${MYSQL_ADMIN_BIN:-${MYSQL_BIN}}"
-MYSQL_ADMIN_ARGS="${MYSQL_ADMIN_ARGS:-}"
+MYSQL_ADMIN_BIN="${MYSQL_ADMIN_BIN:-sudo}"
+MYSQL_ADMIN_ARGS="${MYSQL_ADMIN_ARGS:-mysql}"
 SERVICE_USER="${SERVICE_USER:-pa_indexer}"
 SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
@@ -76,12 +76,14 @@ Install / Configure:
   init-config           Create config.env from config.example.env if missing
   configure             Interactively write config.env
   db:install            Interactively create/reset MySQL database, user, grants, and schema
+  db:uninstall          Interactively drop MySQL schema, database, and/or user
   db:schema             Interactively create/reset only indexer schema relations
   db:status             Check app MySQL login and indexer schema visibility
   show-db-sql           Print admin SQL for database, user, and grants
   install-service-user  Create the dedicated Linux service user/group
   fix-permissions       Apply service-user ownership and private config permissions
   install-systemd       Install and enable worker/reaper systemd services
+  uninstall             Interactively uninstall systemd/logrotate/db/user pieces
   uninstall-systemd     Disable and remove worker/reaper systemd services
   show-systemd          Print generated systemd service files
   install-logrotate     Install logrotate rule for LOG_FILE directory
@@ -485,6 +487,34 @@ fix_permissions() {
   log_info "Applied service write ownership for ${SERVICE_USER}:${SERVICE_GROUP} under ${log_dir}"
 }
 
+uninstall_service_user() {
+  if ! command_exists getent; then
+    log_error "Missing command: getent"
+    exit 1
+  fi
+
+  if getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      userdel "${SERVICE_USER}"
+    else
+      sudo userdel "${SERVICE_USER}"
+    fi
+    log_info "Removed service user: ${SERVICE_USER}"
+  else
+    log_info "Service user does not exist: ${SERVICE_USER}"
+  fi
+
+  if getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      groupdel "${SERVICE_GROUP}" || log_info "Service group still in use: ${SERVICE_GROUP}"
+    else
+      sudo groupdel "${SERVICE_GROUP}" || log_info "Service group still in use: ${SERVICE_GROUP}"
+    fi
+  else
+    log_info "Service group does not exist: ${SERVICE_GROUP}"
+  fi
+}
+
 
 positive_int() {
   [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
@@ -884,6 +914,114 @@ apply_schema_action() {
   esac
 }
 
+drop_indexer_schema() {
+  local table_ident='`search_index_jobs`'
+
+  confirm_exact "Type ${MYSQL_DATABASE} to DROP indexer schema table(s) in ${MYSQL_DATABASE}" "${MYSQL_DATABASE}"
+  mysql_admin "${MYSQL_DATABASE}" -e "DROP TABLE IF EXISTS ${table_ident};"
+  log_info "Dropped indexer schema table(s) from ${MYSQL_DATABASE}"
+}
+
+drop_database() {
+  local db_ident
+
+  db_ident="$(sql_ident "${MYSQL_DATABASE}")"
+  confirm_exact "Type ${MYSQL_DATABASE} to DROP database ${MYSQL_DATABASE}" "${MYSQL_DATABASE}"
+  mysql_admin -e "DROP DATABASE IF EXISTS ${db_ident};"
+  log_info "Dropped database: ${MYSQL_DATABASE}"
+}
+
+drop_mysql_user() {
+  local account
+
+  account="$(mysql_account_sql)"
+  confirm_exact "Type ${MYSQL_USER} to DROP MySQL user ${MYSQL_USER}@${MYSQL_APP_HOST}" "${MYSQL_USER}"
+  mysql_admin -e "DROP USER IF EXISTS ${account}; FLUSH PRIVILEGES;"
+  log_info "Dropped MySQL user: ${MYSQL_USER}@${MYSQL_APP_HOST}"
+}
+
+db_uninstall() {
+  local schema_action
+  local database_action
+  local user_action
+
+  validate_mysql_bootstrap_settings
+
+  printf 'MySQL admin command: %s %s\n' "${MYSQL_ADMIN_BIN}" "${MYSQL_ADMIN_ARGS}"
+  printf 'Target database: %s\n' "${MYSQL_DATABASE}"
+  printf 'Runtime user: %s@%s\n' "${MYSQL_USER}" "${MYSQL_APP_HOST}"
+
+  schema_action="$(prompt_choice schema keep 'keep drop')"
+  database_action="$(prompt_choice database keep 'keep drop')"
+  user_action="$(prompt_choice user keep 'keep drop')"
+
+  if [[ "${schema_action}" == "drop" && "${database_action}" == "drop" ]]; then
+    log_info "Database drop selected; skipping separate schema drop."
+    schema_action="keep"
+  fi
+
+  [[ "${schema_action}" == "drop" ]] && drop_indexer_schema
+  [[ "${database_action}" == "drop" ]] && drop_database
+  [[ "${user_action}" == "drop" ]] && drop_mysql_user
+
+  log_info "MySQL uninstall step finished."
+}
+
+remove_logs() {
+  local log_dir
+  log_dir="$(service_log_dir)"
+
+  confirm_exact "Type DELETE LOGS to remove ${log_dir}" "DELETE LOGS"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    rm -rf "${log_dir}"
+  else
+    sudo rm -rf "${log_dir}"
+  fi
+  log_info "Removed log directory: ${log_dir}"
+}
+
+uninstall_all() {
+  local systemd_action
+  local logrotate_action
+  local db_action
+  local service_user_action
+  local logs_action
+
+  printf 'Feed OpenSearch Indexer uninstall\n'
+  printf 'Service directory: %s\n' "${SERVICE_DIR}"
+  printf 'Database: %s\n' "${MYSQL_DATABASE}"
+  printf 'MySQL user: %s@%s\n' "${MYSQL_USER}" "${MYSQL_APP_HOST}"
+  printf 'Linux service user: %s:%s\n' "${SERVICE_USER}" "${SERVICE_GROUP}"
+
+  systemd_action="$(prompt_choice systemd remove 'remove keep')"
+  logrotate_action="$(prompt_choice logrotate remove 'remove keep')"
+  db_action="$(prompt_choice mysql keep 'keep interactive-drop')"
+  service_user_action="$(prompt_choice service-user keep 'keep remove')"
+  logs_action="$(prompt_choice logs keep 'keep remove')"
+
+  if [[ "${systemd_action}" == "remove" ]]; then
+    uninstall_systemd
+  fi
+
+  if [[ "${logrotate_action}" == "remove" ]]; then
+    uninstall_logrotate
+  fi
+
+  if [[ "${db_action}" == "interactive-drop" ]]; then
+    db_uninstall
+  fi
+
+  if [[ "${service_user_action}" == "remove" ]]; then
+    uninstall_service_user
+  fi
+
+  if [[ "${logs_action}" == "remove" ]]; then
+    remove_logs
+  fi
+
+  log_info "Uninstall flow finished. Project files were not removed."
+}
+
 db_install() {
   local database_action
   local user_action
@@ -1144,6 +1282,9 @@ main() {
     db:install)
       db_install
       ;;
+    db:uninstall)
+      db_uninstall
+      ;;
     db:schema)
       db_schema
       ;;
@@ -1155,6 +1296,9 @@ main() {
       ;;
     install-systemd)
       install_systemd
+      ;;
+    uninstall)
+      uninstall_all
       ;;
     uninstall-systemd)
       uninstall_systemd

@@ -82,22 +82,26 @@ SERVICE_GROUP=pa_indexer
 LOG_FILE=logs/pa_opensearch_indexer.log
 ```
 
-Set a real `MYSQL_PASSWORD` in `config.env` first. For local admin access, set
-`MYSQL_ADMIN_BIN` and `MYSQL_ADMIN_ARGS` to the way this host logs in as a MySQL
-administrator.
+The example config ships with a strong placeholder password and defaults to
+admin bootstrap through `sudo mysql`. Change `MYSQL_PASSWORD` for production,
+and adjust `MYSQL_ADMIN_BIN` / `MYSQL_ADMIN_ARGS` only if the host uses a
+different MySQL admin path.
 
-For a MySQL root password prompt:
-
-```bash
-MYSQL_ADMIN_BIN=mysql
-MYSQL_ADMIN_ARGS="-u root -p"
-```
-
-For socket-authenticated local root via sudo:
+Default socket-authenticated local root via sudo:
 
 ```bash
+MYSQL_BIN=mysql
 MYSQL_ADMIN_BIN=sudo
 MYSQL_ADMIN_ARGS=mysql
+MYSQL_PASSWORD='Pa_Indexer_2026!ChangeMe'
+```
+
+Alternative MySQL root password prompt:
+
+```bash
+MYSQL_BIN=mysql
+MYSQL_ADMIN_BIN=mysql
+MYSQL_ADMIN_ARGS="-u root -p"
 ```
 
 Then run:
@@ -186,6 +190,28 @@ Foreground runs remain available for development:
 ./feed_opensearch_ctl.sh worker:run
 ./feed_opensearch_ctl.sh reaper:run
 ```
+
+## Uninstall
+
+The combined uninstall command is interactive and keeps project files in place:
+
+```bash
+./feed_opensearch_ctl.sh uninstall
+```
+
+It asks separately about systemd units, logrotate, MySQL objects, the Linux
+service user, and logs. Systemd/logrotate removal are the natural defaults;
+database, MySQL user, Linux user, and log deletion default to keeping existing
+state unless explicitly selected.
+
+For only MySQL cleanup:
+
+```bash
+./feed_opensearch_ctl.sh db:uninstall
+```
+
+Destructive database, schema, MySQL user, and log deletion paths require typed
+confirmation.
 
 ## Local OpenSearch
 

@@ -443,6 +443,75 @@ using document id `index`. Page size is controlled by:
 OPENSEARCH_LOADER_PAGE_SIZE=500
 ```
 
+## Operations And Monitoring
+
+After installation, operators need a quick way to understand whether the service
+survived routine trouble such as reboot, power loss, Docker restart, MySQL
+restart, or OpenSearch restart.
+
+Current useful commands:
+
+```bash
+./feed_opensearch_ctl.sh services:status
+./feed_opensearch_ctl.sh services:logs
+./feed_opensearch_ctl.sh db:status
+./feed_opensearch_ctl.sh opensearch:health
+curl http://localhost:9200/campaign_actions_feed/_count?pretty
+sudo mysql deedspot -e "SELECT COUNT(*) FROM campaign_actions WHERE feed_visible = 1;"
+```
+
+The recovery model should be:
+
+```text
+systemd restarts worker/reaper after reboot
+Docker restarts bundled OpenSearch after reboot
+reaper releases stale running jobs after REAPER_STALE_SECONDS
+initial loader can rebuild OpenSearch from the source DB if index data is lost
+```
+
+Planned operator commands:
+
+```bash
+./feed_opensearch_ctl.sh verify
+./feed_opensearch_ctl.sh queue:status
+./feed_opensearch_ctl.sh opensearch:count
+./feed_opensearch_ctl.sh opensearch:drift
+```
+
+`verify` should report:
+
+```text
+System:
+  worker systemd instances active
+  reaper systemd instances active
+  Docker/OpenSearch container running when bundled OpenSearch is used
+
+Indexer DB:
+  runtime login ok
+  queue table visible
+  pending/running/done/failed counts
+  stale running job count
+  oldest pending job age
+
+OpenSearch:
+  cluster reachable
+  cluster status green/yellow/red
+  campaign_actions_feed exists
+  index document count
+
+Source DB:
+  source DB reachable
+  feed_visible source row count
+
+Drift:
+  source feed_visible count
+  OpenSearch document count
+  difference between source rows and indexed documents
+```
+
+If bundled local OpenSearch remains part of the deployable story, the Compose
+service should use a restart policy such as `restart: unless-stopped`.
+
 ## Doctor
 
 Use `doctor` after moving the service to a new host:

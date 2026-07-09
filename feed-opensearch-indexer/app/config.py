@@ -32,6 +32,24 @@ MYSQL_CONFIG = {
     "database": os.getenv("MYSQL_DATABASE", "pa_opensearch_indexer"),
 }
 
+SOURCE_MYSQL_CONFIG = {
+    "host": os.getenv("SOURCE_MYSQL_HOST", "localhost"),
+    "port": int(os.getenv("SOURCE_MYSQL_PORT", "3306")),
+    "user": os.getenv("SOURCE_MYSQL_USER", ""),
+    "password": os.getenv("SOURCE_MYSQL_PASSWORD", ""),
+    "database": os.getenv("SOURCE_MYSQL_DATABASE", "deedspot"),
+    "bin": os.getenv("SOURCE_MYSQL_BIN", "mysql"),
+    "sudo": os.getenv("SOURCE_MYSQL_SUDO", "0"),
+}
+
+OPENSEARCH_CONFIG = {
+    "url": os.getenv("OPENSEARCH_URL", "http://localhost:9200"),
+    "index": os.getenv("OPENSEARCH_INDEX", "campaign_actions_feed"),
+    "username": os.getenv("OPENSEARCH_USERNAME", ""),
+    "password": os.getenv("OPENSEARCH_PASSWORD", ""),
+    "loader_page_size": int(os.getenv("OPENSEARCH_LOADER_PAGE_SIZE", "500")),
+}
+
 
 def ensure_log_directory():
     log_dir = os.path.dirname(LOG_FILE)

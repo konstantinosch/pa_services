@@ -7,6 +7,9 @@ COMPOSE_FILE="${SERVICE_DIR}/docker/opensearch/docker-compose.yml"
 VENV_DIR="${FEED_OPENSEARCH_VENV:-${SERVICE_DIR}/venv}"
 REQUIREMENTS_FILE="${SERVICE_DIR}/requirements.txt"
 INDEXER_SCHEMA_FILE="${SERVICE_DIR}/sql/indexer/schema_mysql.sql"
+OPENSEARCH_INDEX_FILE="${SERVICE_DIR}/opensearch/campaign_actions_feed.index.json"
+OPENSEARCH_DISCOVERY_QUERY_FILE="${SERVICE_DIR}/opensearch/query_stage_d_unrelated_discovery.json"
+OPENSEARCH_FULL_INDEX_SQL_FILE="${SERVICE_DIR}/sql/opensearch/campaign_actions_feed_full_index.sql"
 SYSTEMD_WORKER_TEMPLATE="${FEED_OPENSEARCH_WORKER_TEMPLATE:-pa-feed-opensearch-worker@.service}"
 SYSTEMD_REAPER_TEMPLATE="${FEED_OPENSEARCH_REAPER_TEMPLATE:-pa-feed-opensearch-reaper@.service}"
 LEGACY_SYSTEMD_WORKER_SERVICE="${FEED_OPENSEARCH_WORKER_SERVICE:-pa-feed-opensearch-worker.service}"
@@ -40,8 +43,23 @@ MYSQL_APP_HOST="${MYSQL_APP_HOST:-localhost}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
 MYSQL_ADMIN_BIN="${MYSQL_ADMIN_BIN:-sudo}"
 MYSQL_ADMIN_ARGS="${MYSQL_ADMIN_ARGS:-mysql}"
+SOURCE_MYSQL_HOST="${SOURCE_MYSQL_HOST:-localhost}"
+SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
+SOURCE_MYSQL_USER="${SOURCE_MYSQL_USER:-}"
+SOURCE_MYSQL_PASSWORD="${SOURCE_MYSQL_PASSWORD:-}"
+SOURCE_MYSQL_DATABASE="${SOURCE_MYSQL_DATABASE:-deedspot}"
+SOURCE_MYSQL_BIN="${SOURCE_MYSQL_BIN:-${MYSQL_BIN}}"
+SOURCE_MYSQL_SUDO="${SOURCE_MYSQL_SUDO:-0}"
 SERVICE_USER="${SERVICE_USER:-pa_indexer}"
 SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
+OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9200}"
+OPENSEARCH_INDEX="${OPENSEARCH_INDEX:-campaign_actions_feed}"
+OPENSEARCH_USERNAME="${OPENSEARCH_USERNAME:-}"
+OPENSEARCH_PASSWORD="${OPENSEARCH_PASSWORD:-}"
+OPENSEARCH_TIMEOUT_SECONDS="${OPENSEARCH_TIMEOUT_SECONDS:-10}"
+OPENSEARCH_WAIT_SECONDS="${OPENSEARCH_WAIT_SECONDS:-90}"
+OPENSEARCH_INITIAL_ADMIN_PASSWORD="${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Pa_OpenSearch_2026!ChangeMe}"
+OPENSEARCH_LOADER_PAGE_SIZE="${OPENSEARCH_LOADER_PAGE_SIZE:-500}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_FILE="${LOG_FILE:-logs/pa_opensearch_indexer.log}"
 DAEMON_BATCH_SIZE="${DAEMON_BATCH_SIZE:-100}"
@@ -83,7 +101,7 @@ Install / Configure:
   install-service-user  Create the dedicated Linux service user/group
   fix-permissions       Apply service-user ownership and private config permissions
   install-systemd       Install and enable worker/reaper systemd services
-  uninstall             Interactively uninstall systemd/logrotate/db/user pieces
+  uninstall             Interactively uninstall systemd/logrotate/OpenSearch/db/user pieces
   uninstall-systemd     Disable and remove worker/reaper systemd services
   show-systemd          Print generated systemd service files
   install-logrotate     Install logrotate rule for LOG_FILE directory
@@ -91,11 +109,25 @@ Install / Configure:
   show-logrotate        Print active or generated logrotate rule
 
 OpenSearch:
+  opensearch:install    Start bundled local OpenSearch and wait for health
+  opensearch:uninstall  Interactively stop/remove bundled local OpenSearch
   opensearch:start      Start the local OpenSearch Docker container
   opensearch:stop       Stop the local OpenSearch Docker container
   opensearch:restart    Restart the local OpenSearch Docker container
   opensearch:status     Show OpenSearch container status
   opensearch:logs       Follow OpenSearch logs
+  opensearch:health     Check OpenSearch HTTP and cluster health
+  opensearch:index:create
+                        Create OPENSEARCH_INDEX if missing
+  opensearch:index:reset
+                        Delete and recreate OPENSEARCH_INDEX
+  opensearch:index:delete
+                        Delete OPENSEARCH_INDEX
+  opensearch:index:show Show OPENSEARCH_INDEX mapping/settings
+  opensearch:load:dry-run
+                        Read source DB pages without writing OpenSearch
+  opensearch:load       Create index if missing, then bulk upsert source DB rows
+  opensearch:rebuild    Delete/recreate index, then bulk upsert source DB rows
 
 Indexer:
   worker:run            Run the indexing worker in the foreground
@@ -346,6 +378,9 @@ shell_quote() {
 
 configure() {
   local mysql_password
+  local source_mysql_password
+  local opensearch_password
+  local opensearch_admin_password
   local log_file
   local python_bin
 
@@ -360,12 +395,39 @@ configure() {
   MYSQL_BIN="$(prompt_value MYSQL_BIN "${MYSQL_BIN}")"
   MYSQL_ADMIN_BIN="$(prompt_value MYSQL_ADMIN_BIN "${MYSQL_ADMIN_BIN}")"
   MYSQL_ADMIN_ARGS="$(prompt_value MYSQL_ADMIN_ARGS "${MYSQL_ADMIN_ARGS}")"
+  SOURCE_MYSQL_HOST="$(prompt_value SOURCE_MYSQL_HOST "${SOURCE_MYSQL_HOST}")"
+  SOURCE_MYSQL_PORT="$(prompt_value SOURCE_MYSQL_PORT "${SOURCE_MYSQL_PORT}")"
+  SOURCE_MYSQL_USER="$(prompt_value SOURCE_MYSQL_USER "${SOURCE_MYSQL_USER}")"
+  SOURCE_MYSQL_DATABASE="$(prompt_value SOURCE_MYSQL_DATABASE "${SOURCE_MYSQL_DATABASE}")"
+  SOURCE_MYSQL_BIN="$(prompt_value SOURCE_MYSQL_BIN "${SOURCE_MYSQL_BIN}")"
+  SOURCE_MYSQL_SUDO="$(prompt_value SOURCE_MYSQL_SUDO "${SOURCE_MYSQL_SUDO}")"
   SERVICE_USER="$(prompt_value SERVICE_USER "${SERVICE_USER}")"
   SERVICE_GROUP="$(prompt_value SERVICE_GROUP "${SERVICE_GROUP}")"
+  OPENSEARCH_URL="$(prompt_value OPENSEARCH_URL "${OPENSEARCH_URL}")"
+  OPENSEARCH_INDEX="$(prompt_value OPENSEARCH_INDEX "${OPENSEARCH_INDEX}")"
+  OPENSEARCH_USERNAME="$(prompt_value OPENSEARCH_USERNAME "${OPENSEARCH_USERNAME}")"
+  OPENSEARCH_TIMEOUT_SECONDS="$(prompt_value OPENSEARCH_TIMEOUT_SECONDS "${OPENSEARCH_TIMEOUT_SECONDS}")"
+  OPENSEARCH_WAIT_SECONDS="$(prompt_value OPENSEARCH_WAIT_SECONDS "${OPENSEARCH_WAIT_SECONDS}")"
+  OPENSEARCH_LOADER_PAGE_SIZE="$(prompt_value OPENSEARCH_LOADER_PAGE_SIZE "${OPENSEARCH_LOADER_PAGE_SIZE}")"
+  read -r -s -p "OPENSEARCH_PASSWORD [leave blank to keep current]: " opensearch_password
+  printf '\n'
+  if [[ -z "${opensearch_password}" ]]; then
+    opensearch_password="${OPENSEARCH_PASSWORD}"
+  fi
+  read -r -s -p "OPENSEARCH_INITIAL_ADMIN_PASSWORD [leave blank to keep current]: " opensearch_admin_password
+  printf '\n'
+  if [[ -z "${opensearch_admin_password}" ]]; then
+    opensearch_admin_password="${OPENSEARCH_INITIAL_ADMIN_PASSWORD}"
+  fi
   read -r -s -p "MYSQL_PASSWORD [leave blank to keep current]: " mysql_password
   printf '\n'
   if [[ -z "${mysql_password}" ]]; then
     mysql_password="${MYSQL_PASSWORD}"
+  fi
+  read -r -s -p "SOURCE_MYSQL_PASSWORD [leave blank to keep current]: " source_mysql_password
+  printf '\n'
+  if [[ -z "${source_mysql_password}" ]]; then
+    source_mysql_password="${SOURCE_MYSQL_PASSWORD}"
   fi
   log_file="$(prompt_value LOG_FILE "${LOG_FILE}")"
   python_bin="$(prompt_value PYTHON_BIN "${VENV_DIR}/bin/python")"
@@ -388,8 +450,26 @@ MYSQL_APP_HOST=$(shell_quote "${MYSQL_APP_HOST}")
 MYSQL_BIN=$(shell_quote "${MYSQL_BIN}")
 MYSQL_ADMIN_BIN=$(shell_quote "${MYSQL_ADMIN_BIN}")
 MYSQL_ADMIN_ARGS=$(shell_quote "${MYSQL_ADMIN_ARGS}")
+
+SOURCE_MYSQL_HOST=$(shell_quote "${SOURCE_MYSQL_HOST}")
+SOURCE_MYSQL_PORT=$(shell_quote "${SOURCE_MYSQL_PORT}")
+SOURCE_MYSQL_USER=$(shell_quote "${SOURCE_MYSQL_USER}")
+SOURCE_MYSQL_PASSWORD=$(shell_quote "${source_mysql_password}")
+SOURCE_MYSQL_DATABASE=$(shell_quote "${SOURCE_MYSQL_DATABASE}")
+SOURCE_MYSQL_BIN=$(shell_quote "${SOURCE_MYSQL_BIN}")
+SOURCE_MYSQL_SUDO=$(shell_quote "${SOURCE_MYSQL_SUDO}")
+
 SERVICE_USER=$(shell_quote "${SERVICE_USER}")
 SERVICE_GROUP=$(shell_quote "${SERVICE_GROUP}")
+
+OPENSEARCH_URL=$(shell_quote "${OPENSEARCH_URL}")
+OPENSEARCH_INDEX=$(shell_quote "${OPENSEARCH_INDEX}")
+OPENSEARCH_USERNAME=$(shell_quote "${OPENSEARCH_USERNAME}")
+OPENSEARCH_PASSWORD=$(shell_quote "${opensearch_password}")
+OPENSEARCH_TIMEOUT_SECONDS=${OPENSEARCH_TIMEOUT_SECONDS}
+OPENSEARCH_WAIT_SECONDS=${OPENSEARCH_WAIT_SECONDS}
+OPENSEARCH_INITIAL_ADMIN_PASSWORD=$(shell_quote "${opensearch_admin_password}")
+OPENSEARCH_LOADER_PAGE_SIZE=$(shell_quote "${OPENSEARCH_LOADER_PAGE_SIZE}")
 
 PYTHON_BIN=$(shell_quote "${python_bin}")
 LOG_LEVEL=$(shell_quote "${LOG_LEVEL}")
@@ -485,6 +565,11 @@ fix_permissions() {
 
   log_info "Applied service read permissions for ${SERVICE_GROUP} under ${SERVICE_DIR}"
   log_info "Applied service write ownership for ${SERVICE_USER}:${SERVICE_GROUP} under ${log_dir}"
+  if [[ "$(id -u)" -ne 0 ]] && ! id -nG | tr ' ' '\n' | grep -qx "${SERVICE_GROUP}"; then
+    log_info "Current user $(id -un) is not in group ${SERVICE_GROUP}; future non-sudo control commands may get Permission denied."
+    log_info "Run: sudo usermod -aG ${SERVICE_GROUP} $(id -un)"
+    log_info "Then reconnect or run: newgrp ${SERVICE_GROUP}"
+  fi
 }
 
 uninstall_service_user() {
@@ -751,11 +836,221 @@ compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
 }
 
+require_docker() {
+  if ! command_exists docker; then
+    log_error "docker is missing."
+    log_error "Install Docker or configure OPENSEARCH_URL for an external OpenSearch service."
+    exit 1
+  fi
+}
+
 require_compose_file() {
   if [[ ! -f "${COMPOSE_FILE}" ]]; then
     log_error "Missing compose file: ${COMPOSE_FILE}"
     exit 1
   fi
+}
+
+require_opensearch_index_file() {
+  if [[ ! -f "${OPENSEARCH_INDEX_FILE}" ]]; then
+    log_error "Missing OpenSearch index file: ${OPENSEARCH_INDEX_FILE}"
+    exit 1
+  fi
+}
+
+opensearch_curl() {
+  local method="$1"
+  local path="$2"
+  shift 2
+
+  local args=(
+    --silent
+    --show-error
+    --fail
+    --connect-timeout "${OPENSEARCH_TIMEOUT_SECONDS}"
+    --max-time "${OPENSEARCH_TIMEOUT_SECONDS}"
+    -X "${method}"
+  )
+
+  if [[ -n "${OPENSEARCH_USERNAME}" ]]; then
+    args+=(-u "${OPENSEARCH_USERNAME}:${OPENSEARCH_PASSWORD}")
+  fi
+
+  curl "${args[@]}" "${OPENSEARCH_URL%/}${path}" "$@"
+}
+
+opensearch_status_code() {
+  local method="$1"
+  local path="$2"
+  local args=(
+    --silent
+    --output /dev/null
+    --write-out '%{http_code}'
+    --connect-timeout "${OPENSEARCH_TIMEOUT_SECONDS}"
+    --max-time "${OPENSEARCH_TIMEOUT_SECONDS}"
+    -X "${method}"
+  )
+
+  if [[ -n "${OPENSEARCH_USERNAME}" ]]; then
+    args+=(-u "${OPENSEARCH_USERNAME}:${OPENSEARCH_PASSWORD}")
+  fi
+
+  curl "${args[@]}" "${OPENSEARCH_URL%/}${path}" || true
+}
+
+opensearch_index_exists() {
+  [[ "$(opensearch_status_code HEAD "/${OPENSEARCH_INDEX}")" == "200" ]]
+}
+
+opensearch_wait() {
+  local deadline
+  deadline=$((SECONDS + OPENSEARCH_WAIT_SECONDS))
+
+  log_info "Waiting up to ${OPENSEARCH_WAIT_SECONDS}s for OpenSearch at ${OPENSEARCH_URL}."
+  while (( SECONDS < deadline )); do
+    if opensearch_curl GET "/" >/dev/null 2>&1; then
+      log_info "OpenSearch is reachable."
+      return 0
+    fi
+    sleep 2
+  done
+
+  log_error "OpenSearch did not become reachable at ${OPENSEARCH_URL}."
+  return 1
+}
+
+opensearch_install() {
+  require_docker
+  require_compose_file
+  compose up -d
+  opensearch_wait
+  opensearch_health
+}
+
+opensearch_uninstall() {
+  local action
+
+  printf 'Bundled local OpenSearch uninstall\n'
+  printf 'compose_file=%s\n' "${COMPOSE_FILE}"
+  printf 'url=%s\n' "${OPENSEARCH_URL}"
+  action="$(prompt_choice containers stop 'stop down down-volumes keep')"
+  opensearch_apply_container_action "${action}"
+}
+
+opensearch_apply_container_action() {
+  local action="$1"
+  case "${action}" in
+    stop)
+      require_docker
+      require_compose_file
+      compose stop
+      ;;
+    down)
+      require_docker
+      require_compose_file
+      compose down
+      ;;
+    down-volumes)
+      confirm_exact "Type ${OPENSEARCH_INDEX} to remove OpenSearch containers and Docker volume data" "${OPENSEARCH_INDEX}"
+      require_docker
+      require_compose_file
+      compose down -v
+      ;;
+    keep)
+      log_info "Keeping bundled OpenSearch containers untouched."
+      ;;
+  esac
+}
+
+opensearch_health() {
+  printf 'OpenSearch HTTP status\n'
+  printf 'url=%s\n' "${OPENSEARCH_URL}"
+  printf 'index=%s\n' "${OPENSEARCH_INDEX}"
+  opensearch_curl GET "/" || return 1
+  printf '\n\nOpenSearch cluster health\n'
+  opensearch_curl GET "/_cluster/health?pretty"
+  printf '\n'
+}
+
+opensearch_index_create() {
+  require_opensearch_index_file
+
+  if opensearch_index_exists; then
+    log_info "OpenSearch index already exists: ${OPENSEARCH_INDEX}"
+    return 0
+  fi
+
+  log_info "Creating OpenSearch index: ${OPENSEARCH_INDEX}"
+  opensearch_curl PUT "/${OPENSEARCH_INDEX}" \
+    -H 'Content-Type: application/json' \
+    --data-binary "@${OPENSEARCH_INDEX_FILE}"
+  printf '\n'
+}
+
+opensearch_index_delete() {
+  if ! opensearch_index_exists; then
+    log_info "OpenSearch index does not exist: ${OPENSEARCH_INDEX}"
+    return 0
+  fi
+
+  confirm_exact "Type ${OPENSEARCH_INDEX} to DELETE OpenSearch index ${OPENSEARCH_INDEX}" "${OPENSEARCH_INDEX}"
+  opensearch_curl DELETE "/${OPENSEARCH_INDEX}"
+  printf '\n'
+}
+
+opensearch_index_reset() {
+  require_opensearch_index_file
+  confirm_exact "Type ${OPENSEARCH_INDEX} to DELETE and recreate OpenSearch index ${OPENSEARCH_INDEX}" "${OPENSEARCH_INDEX}"
+
+  if opensearch_index_exists; then
+    opensearch_curl DELETE "/${OPENSEARCH_INDEX}"
+    printf '\n'
+  fi
+
+  opensearch_index_create
+}
+
+opensearch_index_show() {
+  opensearch_curl GET "/${OPENSEARCH_INDEX}?pretty"
+  printf '\n'
+}
+
+run_opensearch_loader() {
+  local args=(
+    -m app.index_loader
+    --sql-file "${OPENSEARCH_FULL_INDEX_SQL_FILE}"
+    --index-file "${OPENSEARCH_INDEX_FILE}"
+    --mysql-command "${SOURCE_MYSQL_BIN}"
+    --mysql-host "${SOURCE_MYSQL_HOST}"
+    --mysql-port "${SOURCE_MYSQL_PORT}"
+    --mysql-user "${SOURCE_MYSQL_USER}"
+    --mysql-password "${SOURCE_MYSQL_PASSWORD}"
+    --mysql-database "${SOURCE_MYSQL_DATABASE}"
+    --opensearch-url "${OPENSEARCH_URL}"
+    --opensearch-username "${OPENSEARCH_USERNAME}"
+    --opensearch-password "${OPENSEARCH_PASSWORD}"
+    --index "${OPENSEARCH_INDEX}"
+    --page-size "${OPENSEARCH_LOADER_PAGE_SIZE}"
+  )
+
+  if [[ "${SOURCE_MYSQL_SUDO}" == "1" || "${SOURCE_MYSQL_SUDO}" == "true" || "${SOURCE_MYSQL_SUDO}" == "yes" ]]; then
+    args+=(--mysql-sudo)
+  fi
+
+  "${PYTHON_BIN}" "${args[@]}" "$@"
+}
+
+opensearch_load_dry_run() {
+  run_opensearch_loader --dry-run
+}
+
+opensearch_load() {
+  run_opensearch_loader --create-index
+}
+
+opensearch_rebuild() {
+  confirm_exact "Type ${OPENSEARCH_INDEX} to DELETE and rebuild OpenSearch index ${OPENSEARCH_INDEX}" "${OPENSEARCH_INDEX}"
+  run_opensearch_loader --reset-index
 }
 
 require_systemctl() {
@@ -983,6 +1278,8 @@ remove_logs() {
 uninstall_all() {
   local systemd_action
   local logrotate_action
+  local opensearch_index_action
+  local opensearch_container_action
   local db_action
   local service_user_action
   local logs_action
@@ -991,10 +1288,14 @@ uninstall_all() {
   printf 'Service directory: %s\n' "${SERVICE_DIR}"
   printf 'Database: %s\n' "${MYSQL_DATABASE}"
   printf 'MySQL user: %s@%s\n' "${MYSQL_USER}" "${MYSQL_APP_HOST}"
+  printf 'OpenSearch URL: %s\n' "${OPENSEARCH_URL}"
+  printf 'OpenSearch index: %s\n' "${OPENSEARCH_INDEX}"
   printf 'Linux service user: %s:%s\n' "${SERVICE_USER}" "${SERVICE_GROUP}"
 
   systemd_action="$(prompt_choice systemd remove 'remove keep')"
   logrotate_action="$(prompt_choice logrotate remove 'remove keep')"
+  opensearch_index_action="$(prompt_choice opensearch-index keep 'keep delete')"
+  opensearch_container_action="$(prompt_choice opensearch-containers keep 'keep stop down down-volumes')"
   db_action="$(prompt_choice mysql keep 'keep interactive-drop')"
   service_user_action="$(prompt_choice service-user keep 'keep remove')"
   logs_action="$(prompt_choice logs keep 'keep remove')"
@@ -1005,6 +1306,14 @@ uninstall_all() {
 
   if [[ "${logrotate_action}" == "remove" ]]; then
     uninstall_logrotate
+  fi
+
+  if [[ "${opensearch_index_action}" == "delete" ]]; then
+    opensearch_index_delete
+  fi
+
+  if [[ "${opensearch_container_action}" != "keep" ]]; then
+    opensearch_apply_container_action "${opensearch_container_action}"
   fi
 
   if [[ "${db_action}" == "interactive-drop" ]]; then
@@ -1111,8 +1420,25 @@ mysql_app_host=${MYSQL_APP_HOST}
 mysql_bin=${MYSQL_BIN}
 mysql_admin_bin=${MYSQL_ADMIN_BIN}
 mysql_admin_args_set=$([[ -n "${MYSQL_ADMIN_ARGS}" ]] && printf yes || printf no)
+source_mysql_host=${SOURCE_MYSQL_HOST}
+source_mysql_port=${SOURCE_MYSQL_PORT}
+source_mysql_user=${SOURCE_MYSQL_USER}
+source_mysql_password_set=$([[ -n "${SOURCE_MYSQL_PASSWORD}" ]] && printf yes || printf no)
+source_mysql_database=${SOURCE_MYSQL_DATABASE}
+source_mysql_bin=${SOURCE_MYSQL_BIN}
+source_mysql_sudo=${SOURCE_MYSQL_SUDO}
 service_user=${SERVICE_USER}
 service_group=${SERVICE_GROUP}
+opensearch_url=${OPENSEARCH_URL}
+opensearch_index=${OPENSEARCH_INDEX}
+opensearch_username_set=$([[ -n "${OPENSEARCH_USERNAME}" ]] && printf yes || printf no)
+opensearch_password_set=$([[ -n "${OPENSEARCH_PASSWORD}" ]] && printf yes || printf no)
+opensearch_timeout_seconds=${OPENSEARCH_TIMEOUT_SECONDS}
+opensearch_wait_seconds=${OPENSEARCH_WAIT_SECONDS}
+opensearch_loader_page_size=${OPENSEARCH_LOADER_PAGE_SIZE}
+opensearch_index_file=${OPENSEARCH_INDEX_FILE}
+opensearch_discovery_query_file=${OPENSEARCH_DISCOVERY_QUERY_FILE}
+opensearch_full_index_sql_file=${OPENSEARCH_FULL_INDEX_SQL_FILE}
 indexer_schema_file=${INDEXER_SCHEMA_FILE}
 log_file=${LOG_FILE}
 log_dir=$(service_log_dir)
@@ -1161,6 +1487,14 @@ doctor_check_password() {
   else
     printf 'warn MYSQL_PASSWORD is empty\n'
   fi
+
+  if [[ "${SOURCE_MYSQL_SUDO}" == "1" || "${SOURCE_MYSQL_SUDO}" == "true" || "${SOURCE_MYSQL_SUDO}" == "yes" ]]; then
+    printf 'ok   SOURCE_MYSQL_SUDO enabled for source DB reads\n'
+  elif [[ -n "${SOURCE_MYSQL_USER}" ]]; then
+    printf 'ok   SOURCE_MYSQL_USER is set\n'
+  else
+    printf 'warn SOURCE_MYSQL_USER is empty; loader requires SOURCE_MYSQL_USER or SOURCE_MYSQL_SUDO=1\n'
+  fi
 }
 doctor_check_service() {
   local service_name="$1"
@@ -1185,6 +1519,9 @@ doctor() {
     doctor_check_python_venv_module
   fi
   doctor_check_command "${MYSQL_BIN}"
+  if [[ "${SOURCE_MYSQL_BIN}" != "${MYSQL_BIN}" ]]; then
+    doctor_check_command "${SOURCE_MYSQL_BIN}"
+  fi
   if [[ "${MYSQL_ADMIN_BIN}" != "${MYSQL_BIN}" ]]; then
     doctor_check_command "${MYSQL_ADMIN_BIN}"
   fi
@@ -1206,6 +1543,9 @@ doctor() {
   doctor_check_file requirements "${REQUIREMENTS_FILE}"
   doctor_check_file indexer_schema "${INDEXER_SCHEMA_FILE}"
   doctor_check_file compose "${COMPOSE_FILE}"
+  doctor_check_file opensearch_index "${OPENSEARCH_INDEX_FILE}"
+  doctor_check_file opensearch_query "${OPENSEARCH_DISCOVERY_QUERY_FILE}"
+  doctor_check_file opensearch_full_index_sql "${OPENSEARCH_FULL_INDEX_SQL_FILE}"
   if [[ -x "${VENV_DIR}/bin/python" ]]; then
     printf 'ok   venv python %s\n' "${VENV_DIR}/bin/python"
   else
@@ -1229,6 +1569,10 @@ doctor_next_steps() {
 
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
     printf '  - Create Python venv: ./feed_opensearch_ctl.sh setup-venv\n'
+  fi
+
+  if command_exists docker; then
+    printf '  - Optional local OpenSearch: ./feed_opensearch_ctl.sh opensearch:install && ./feed_opensearch_ctl.sh opensearch:index:create\n'
   fi
 
   if ! command_exists docker; then
@@ -1318,25 +1662,60 @@ main() {
     config)
       print_config
       ;;
+    opensearch:install)
+      opensearch_install
+      ;;
+    opensearch:uninstall)
+      opensearch_uninstall
+      ;;
     opensearch:start)
+      require_docker
       require_compose_file
       compose up -d
       ;;
     opensearch:stop)
+      require_docker
       require_compose_file
       compose stop
       ;;
     opensearch:restart)
+      require_docker
       require_compose_file
       compose restart
       ;;
     opensearch:status)
+      require_docker
       require_compose_file
       compose ps
       ;;
     opensearch:logs)
+      require_docker
       require_compose_file
       compose logs -f
+      ;;
+    opensearch:health)
+      opensearch_health
+      ;;
+    opensearch:index:create)
+      opensearch_index_create
+      ;;
+    opensearch:index:reset)
+      opensearch_index_reset
+      ;;
+    opensearch:index:delete)
+      opensearch_index_delete
+      ;;
+    opensearch:index:show)
+      opensearch_index_show
+      ;;
+    opensearch:load:dry-run)
+      opensearch_load_dry_run
+      ;;
+    opensearch:load)
+      opensearch_load
+      ;;
+    opensearch:rebuild)
+      opensearch_rebuild
       ;;
     worker:run)
       ensure_log_dir

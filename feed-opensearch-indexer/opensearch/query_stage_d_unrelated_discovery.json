@@ -1,0 +1,35 @@
+{
+  "_source": ["created_at", "index", "campaign_index", "tags"],
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "range": {
+            "created_at": {
+              "gte": 0,
+              "lte": 4102444800
+            }
+          }
+        }
+      ],
+      "must_not": [
+        {
+          "ids": {
+            "values": ["INDEX_1", "INDEX_2"]
+          }
+        },
+        {
+          "terms": {
+            "tags": [1, 2, 3]
+          }
+        }
+      ]
+    }
+  },
+  "sort": [
+    { "created_at": "desc" },
+    { "index": "desc" }
+  ],
+  "search_after": ["LAST_CREATED_AT", "LAST_INDEX"],
+  "size": 50
+}

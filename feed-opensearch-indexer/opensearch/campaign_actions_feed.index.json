@@ -1,0 +1,22 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "created_at": {
+        "type": "long"
+      },
+      "index": {
+        "type": "integer"
+      },
+      "campaign_index": {
+        "type": "integer"
+      },
+      "tags": {
+        "type": "integer"
+      }
+    }
+  }
+}

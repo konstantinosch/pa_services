@@ -124,7 +124,15 @@ The production/application source database. This owns tables such as
 `campaign_actions`, `campaigns_tags`, and `campaign_tags`, and is read when
 building OpenSearch documents.
 
-The initial OpenSearch loader needs either a source DB user:
+The default local/development path uses socket-authenticated sudo access:
+
+```bash
+SOURCE_MYSQL_DATABASE=deedspot
+SOURCE_MYSQL_BIN=mysql
+SOURCE_MYSQL_SUDO=1
+```
+
+For production, prefer an explicit read-only source DB user and disable sudo:
 
 ```bash
 SOURCE_MYSQL_HOST=localhost
@@ -134,14 +142,6 @@ SOURCE_MYSQL_PASSWORD='change-me'
 SOURCE_MYSQL_DATABASE=deedspot
 SOURCE_MYSQL_BIN=mysql
 SOURCE_MYSQL_SUDO=0
-```
-
-or local socket sudo access for development:
-
-```bash
-SOURCE_MYSQL_DATABASE=deedspot
-SOURCE_MYSQL_BIN=mysql
-SOURCE_MYSQL_SUDO=1
 ```
 
 ## MySQL Bootstrap
@@ -270,26 +270,34 @@ Foreground runs remain available for development:
 
 ## Uninstall
 
-The combined uninstall command is interactive and keeps project files in place:
+The default uninstall command is non-interactive and removes managed install
+state while keeping project files in place:
 
 ```bash
 ./feed_opensearch_ctl.sh uninstall
 ```
 
+It removes systemd units, logrotate config, `OPENSEARCH_INDEX`, bundled
+OpenSearch containers and volumes, the indexer MySQL database/user, the Linux
+service user, and logs. It does not remove `/opt/pa_services` project files.
+
+For selective cleanup, use the interactive path:
+
+```bash
+./feed_opensearch_ctl.sh uninstall-interactive
+```
+
 It asks separately about systemd units, logrotate, OpenSearch index/container
-state, MySQL objects, the Linux service user, and logs. Systemd/logrotate
-removal are the natural defaults; OpenSearch index/container data, database,
-MySQL user, Linux user, and log deletion default to keeping existing state unless
-explicitly selected.
+state, MySQL objects, the Linux service user, and logs.
 
 OpenSearch uninstall choices are split deliberately:
 
 ```bash
-opensearch-index [keep] (keep delete)
+opensearch-index [keep] (keep remove)
 opensearch-containers [keep] (keep stop down down-volumes)
 ```
 
-`delete` removes only `OPENSEARCH_INDEX` through the OpenSearch HTTP API.
+`remove` deletes only `OPENSEARCH_INDEX` through the OpenSearch HTTP API.
 `down-volumes` removes the bundled Docker Compose volume and therefore all
 local OpenSearch index data for that container.
 
@@ -299,8 +307,16 @@ For only MySQL cleanup:
 ./feed_opensearch_ctl.sh db:uninstall
 ```
 
-Destructive database, schema, MySQL user, and log deletion paths require typed
-confirmation.
+For repeat test teardown, the non-interactive drop shortcut removes the indexer
+database and MySQL runtime user immediately:
+
+```bash
+./feed_opensearch_ctl.sh db:drop
+```
+
+`db:uninstall` destructive paths require typed confirmation. `db:drop` is
+intentionally non-interactive and should only be used when the configured
+`MYSQL_DATABASE` and `MYSQL_USER` are known test/install targets.
 
 ## Docker Engine Setup
 
@@ -354,6 +370,19 @@ docker run hello-world
 
 Membership in the `docker` group grants root-level control of the host. Use it
 on development VMs or trusted deployer accounts only.
+
+If Docker is installed but the current user cannot access
+`/var/run/docker.sock`, Docker commands may fail with permission denied. Either
+add the deployer account to the `docker` group and reconnect:
+
+```bash
+sudo usermod -aG docker "$USER"
+exit
+```
+
+or allow the control script to use `sudo docker` when it manages the bundled
+OpenSearch container. `doctor` reports whether Docker API access works directly,
+via sudo, or not at all.
 
 ## Local OpenSearch
 
@@ -440,7 +469,7 @@ The loader pages by `(created_at, index)` using
 using document id `index`. Page size is controlled by:
 
 ```bash
-OPENSEARCH_LOADER_PAGE_SIZE=500
+OPENSEARCH_LOADER_PAGE_SIZE=10000
 ```
 
 ## Operations And Monitoring

@@ -43,13 +43,14 @@ MYSQL_APP_HOST="${MYSQL_APP_HOST:-localhost}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
 MYSQL_ADMIN_BIN="${MYSQL_ADMIN_BIN:-sudo}"
 MYSQL_ADMIN_ARGS="${MYSQL_ADMIN_ARGS:-mysql}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
 SOURCE_MYSQL_HOST="${SOURCE_MYSQL_HOST:-localhost}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_USER="${SOURCE_MYSQL_USER:-}"
 SOURCE_MYSQL_PASSWORD="${SOURCE_MYSQL_PASSWORD:-}"
 SOURCE_MYSQL_DATABASE="${SOURCE_MYSQL_DATABASE:-deedspot}"
 SOURCE_MYSQL_BIN="${SOURCE_MYSQL_BIN:-${MYSQL_BIN}}"
-SOURCE_MYSQL_SUDO="${SOURCE_MYSQL_SUDO:-0}"
+SOURCE_MYSQL_SUDO="${SOURCE_MYSQL_SUDO:-1}"
 SERVICE_USER="${SERVICE_USER:-pa_indexer}"
 SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9200}"
@@ -59,7 +60,7 @@ OPENSEARCH_PASSWORD="${OPENSEARCH_PASSWORD:-}"
 OPENSEARCH_TIMEOUT_SECONDS="${OPENSEARCH_TIMEOUT_SECONDS:-10}"
 OPENSEARCH_WAIT_SECONDS="${OPENSEARCH_WAIT_SECONDS:-90}"
 OPENSEARCH_INITIAL_ADMIN_PASSWORD="${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Pa_OpenSearch_2026!ChangeMe}"
-OPENSEARCH_LOADER_PAGE_SIZE="${OPENSEARCH_LOADER_PAGE_SIZE:-500}"
+OPENSEARCH_LOADER_PAGE_SIZE="${OPENSEARCH_LOADER_PAGE_SIZE:-10000}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_FILE="${LOG_FILE:-logs/pa_opensearch_indexer.log}"
 DAEMON_BATCH_SIZE="${DAEMON_BATCH_SIZE:-100}"
@@ -95,13 +96,15 @@ Install / Configure:
   configure             Interactively write config.env
   db:install            Interactively create/reset MySQL database, user, grants, and schema
   db:uninstall          Interactively drop MySQL schema, database, and/or user
+  db:drop               Non-interactively drop MySQL database and runtime user
   db:schema             Interactively create/reset only indexer schema relations
   db:status             Check app MySQL login and indexer schema visibility
   show-db-sql           Print admin SQL for database, user, and grants
   install-service-user  Create the dedicated Linux service user/group
   fix-permissions       Apply service-user ownership and private config permissions
   install-systemd       Install and enable worker/reaper systemd services
-  uninstall             Interactively uninstall systemd/logrotate/OpenSearch/db/user pieces
+  uninstall             Non-interactively remove managed install state
+  uninstall-interactive Interactively uninstall selected managed pieces
   uninstall-systemd     Disable and remove worker/reaper systemd services
   show-systemd          Print generated systemd service files
   install-logrotate     Install logrotate rule for LOG_FILE directory
@@ -832,12 +835,34 @@ show_logrotate() {
   logrotate_content
 }
 
+docker_has_direct_access() {
+  "${DOCKER_BIN}" info >/dev/null 2>&1
+}
+
+docker_has_sudo_access() {
+  [[ "$(id -u)" -ne 0 ]] && command_exists sudo && sudo -n "${DOCKER_BIN}" info >/dev/null 2>&1
+}
+
+docker_run() {
+  if docker_has_direct_access; then
+    "${DOCKER_BIN}" "$@"
+    return
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]] && command_exists sudo; then
+    sudo "${DOCKER_BIN}" "$@"
+    return
+  fi
+
+  "${DOCKER_BIN}" "$@"
+}
+
 compose() {
-  docker compose -f "${COMPOSE_FILE}" "$@"
+  docker_run compose -f "${COMPOSE_FILE}" "$@"
 }
 
 require_docker() {
-  if ! command_exists docker; then
+  if ! command_exists "${DOCKER_BIN}"; then
     log_error "docker is missing."
     log_error "Install Docker or configure OPENSEARCH_URL for an external OpenSearch service."
     exit 1
@@ -939,6 +964,7 @@ opensearch_uninstall() {
 
 opensearch_apply_container_action() {
   local action="$1"
+  local require_confirmation="${2:-yes}"
   case "${action}" in
     stop)
       require_docker
@@ -951,7 +977,9 @@ opensearch_apply_container_action() {
       compose down
       ;;
     down-volumes)
-      confirm_exact "Type ${OPENSEARCH_INDEX} to remove OpenSearch containers and Docker volume data" "${OPENSEARCH_INDEX}"
+      if [[ "${require_confirmation}" == "yes" ]]; then
+        confirm_exact "Type ${OPENSEARCH_INDEX} to remove OpenSearch containers and Docker volume data" "${OPENSEARCH_INDEX}"
+      fi
       require_docker
       require_compose_file
       compose down -v
@@ -994,6 +1022,16 @@ opensearch_index_delete() {
   fi
 
   confirm_exact "Type ${OPENSEARCH_INDEX} to DELETE OpenSearch index ${OPENSEARCH_INDEX}" "${OPENSEARCH_INDEX}"
+  opensearch_curl DELETE "/${OPENSEARCH_INDEX}"
+  printf '\n'
+}
+
+opensearch_index_delete_now() {
+  if ! opensearch_index_exists; then
+    log_info "OpenSearch index does not exist: ${OPENSEARCH_INDEX}"
+    return 0
+  fi
+
   opensearch_curl DELETE "/${OPENSEARCH_INDEX}"
   printf '\n'
 }
@@ -1058,6 +1096,20 @@ require_systemctl() {
     log_error "systemctl is missing."
     exit 1
   fi
+}
+
+opensearch_destroy_containers_now() {
+  if ! command_exists "${DOCKER_BIN}"; then
+    log_info "Docker command missing; skipping bundled OpenSearch container cleanup."
+    return
+  fi
+
+  if [[ ! -f "${COMPOSE_FILE}" ]]; then
+    log_info "Compose file missing; skipping bundled OpenSearch container cleanup."
+    return
+  fi
+
+  opensearch_apply_container_action down-volumes no
 }
 
 
@@ -1235,6 +1287,35 @@ drop_mysql_user() {
   log_info "Dropped MySQL user: ${MYSQL_USER}@${MYSQL_APP_HOST}"
 }
 
+drop_database_now() {
+  local db_ident
+
+  db_ident="$(sql_ident "${MYSQL_DATABASE}")"
+  mysql_admin -e "DROP DATABASE IF EXISTS ${db_ident};"
+  log_info "Dropped database: ${MYSQL_DATABASE}"
+}
+
+drop_mysql_user_now() {
+  local account
+
+  account="$(mysql_account_sql)"
+  mysql_admin -e "DROP USER IF EXISTS ${account}; FLUSH PRIVILEGES;"
+  log_info "Dropped MySQL user: ${MYSQL_USER}@${MYSQL_APP_HOST}"
+}
+
+db_drop() {
+  validate_mysql_bootstrap_settings
+
+  printf 'MySQL admin command: %s %s\n' "${MYSQL_ADMIN_BIN}" "${MYSQL_ADMIN_ARGS}"
+  printf 'Dropping database: %s\n' "${MYSQL_DATABASE}"
+  printf 'Dropping runtime user: %s@%s\n' "${MYSQL_USER}" "${MYSQL_APP_HOST}"
+
+  drop_database_now
+  drop_mysql_user_now
+
+  log_info "MySQL database/user drop finished."
+}
+
 db_uninstall() {
   local schema_action
   local database_action
@@ -1267,6 +1348,13 @@ remove_logs() {
   log_dir="$(service_log_dir)"
 
   confirm_exact "Type DELETE LOGS to remove ${log_dir}" "DELETE LOGS"
+  remove_logs_now
+}
+
+remove_logs_now() {
+  local log_dir
+  log_dir="$(service_log_dir)"
+
   if [[ "$(id -u)" -eq 0 ]]; then
     rm -rf "${log_dir}"
   else
@@ -1275,7 +1363,23 @@ remove_logs() {
   log_info "Removed log directory: ${log_dir}"
 }
 
-uninstall_all() {
+uninstall_destroy() {
+  printf 'Feed OpenSearch Indexer uninstall\n'
+  printf 'Removing managed install state without prompts.\n'
+  printf 'Project files are kept in place: %s\n' "${SERVICE_DIR}"
+
+  uninstall_systemd
+  uninstall_logrotate
+  opensearch_index_delete_now
+  opensearch_destroy_containers_now
+  db_drop
+  uninstall_service_user
+  remove_logs_now
+
+  log_info "Uninstall flow finished. Project files were not removed."
+}
+
+uninstall_interactive() {
   local systemd_action
   local logrotate_action
   local opensearch_index_action
@@ -1294,9 +1398,9 @@ uninstall_all() {
 
   systemd_action="$(prompt_choice systemd remove 'remove keep')"
   logrotate_action="$(prompt_choice logrotate remove 'remove keep')"
-  opensearch_index_action="$(prompt_choice opensearch-index keep 'keep delete')"
+  opensearch_index_action="$(prompt_choice opensearch-index keep 'keep remove')"
   opensearch_container_action="$(prompt_choice opensearch-containers keep 'keep stop down down-volumes')"
-  db_action="$(prompt_choice mysql keep 'keep interactive-drop')"
+  db_action="$(prompt_choice mysql keep 'keep interactive-drop drop')"
   service_user_action="$(prompt_choice service-user keep 'keep remove')"
   logs_action="$(prompt_choice logs keep 'keep remove')"
 
@@ -1308,7 +1412,7 @@ uninstall_all() {
     uninstall_logrotate
   fi
 
-  if [[ "${opensearch_index_action}" == "delete" ]]; then
+  if [[ "${opensearch_index_action}" == "remove" ]]; then
     opensearch_index_delete
   fi
 
@@ -1318,6 +1422,10 @@ uninstall_all() {
 
   if [[ "${db_action}" == "interactive-drop" ]]; then
     db_uninstall
+  fi
+
+  if [[ "${db_action}" == "drop" ]]; then
+    db_drop
   fi
 
   if [[ "${service_user_action}" == "remove" ]]; then
@@ -1420,6 +1528,7 @@ mysql_app_host=${MYSQL_APP_HOST}
 mysql_bin=${MYSQL_BIN}
 mysql_admin_bin=${MYSQL_ADMIN_BIN}
 mysql_admin_args_set=$([[ -n "${MYSQL_ADMIN_ARGS}" ]] && printf yes || printf no)
+docker_bin=${DOCKER_BIN}
 source_mysql_host=${SOURCE_MYSQL_HOST}
 source_mysql_port=${SOURCE_MYSQL_PORT}
 source_mysql_user=${SOURCE_MYSQL_USER}
@@ -1461,6 +1570,28 @@ doctor_check_command() {
   else
     printf 'miss command %s\n' "${command_name}"
   fi
+}
+
+doctor_check_docker_access() {
+  if ! command_exists "${DOCKER_BIN}"; then
+    printf 'miss command %s\n' "${DOCKER_BIN}"
+    return
+  fi
+
+  printf 'ok   command %s -> %s\n' "${DOCKER_BIN}" "$(command -v "${DOCKER_BIN}")"
+
+  if docker_has_direct_access; then
+    printf 'ok   docker API access for current user\n'
+    return
+  fi
+
+  if docker_has_sudo_access; then
+    printf 'ok   docker API access via sudo\n'
+    return
+  fi
+
+  printf 'warn docker API access denied for current user\n'
+  printf 'hint add user to docker group and reconnect, or allow sudo docker\n'
 }
 
 doctor_check_python_venv_module() {
@@ -1528,7 +1659,7 @@ doctor() {
   doctor_check_command curl
   doctor_check_command systemctl
   doctor_check_command logrotate
-  doctor_check_command docker
+  doctor_check_docker_access
   doctor_check_password
   if command_exists getent; then
     if getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
@@ -1629,6 +1760,9 @@ main() {
     db:uninstall)
       db_uninstall
       ;;
+    db:drop)
+      db_drop
+      ;;
     db:schema)
       db_schema
       ;;
@@ -1642,7 +1776,10 @@ main() {
       install_systemd
       ;;
     uninstall)
-      uninstall_all
+      uninstall_destroy
+      ;;
+    uninstall-interactive)
+      uninstall_interactive
       ;;
     uninstall-systemd)
       uninstall_systemd

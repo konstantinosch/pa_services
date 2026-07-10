@@ -39,7 +39,7 @@ SOURCE_MYSQL_CONFIG = {
     "password": os.getenv("SOURCE_MYSQL_PASSWORD", ""),
     "database": os.getenv("SOURCE_MYSQL_DATABASE", "deedspot"),
     "bin": os.getenv("SOURCE_MYSQL_BIN", "mysql"),
-    "sudo": os.getenv("SOURCE_MYSQL_SUDO", "0"),
+    "sudo": os.getenv("SOURCE_MYSQL_SUDO", "1"),
 }
 
 OPENSEARCH_CONFIG = {
@@ -47,7 +47,7 @@ OPENSEARCH_CONFIG = {
     "index": os.getenv("OPENSEARCH_INDEX", "campaign_actions_feed"),
     "username": os.getenv("OPENSEARCH_USERNAME", ""),
     "password": os.getenv("OPENSEARCH_PASSWORD", ""),
-    "loader_page_size": int(os.getenv("OPENSEARCH_LOADER_PAGE_SIZE", "500")),
+    "loader_page_size": int(os.getenv("OPENSEARCH_LOADER_PAGE_SIZE", "10000")),
 }
 
 

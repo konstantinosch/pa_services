@@ -66,7 +66,10 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_FILE="${LOG_FILE:-logs/pa_opensearch_indexer.log}"
 WORKER_BATCH_SIZE="${WORKER_BATCH_SIZE:-100}"
 WORKER_CLAIM_STRATEGY="${WORKER_CLAIM_STRATEGY:-simple}"
-REAPER_STALE_SECONDS="${REAPER_STALE_SECONDS:-600}"
+WORKER_MAX_RETRIES="${WORKER_MAX_RETRIES:-10}"
+JOB_CLEANUP_BATCH_SIZE="${JOB_CLEANUP_BATCH_SIZE:-10000}"
+REAPER_STALE_SECONDS="${REAPER_STALE_SECONDS:-120}"
+REAPER_RELEASE_DELAY_SECONDS="${REAPER_RELEASE_DELAY_SECONDS:-30}"
 WORKER_COUNT="${WORKER_COUNT:-1}"
 REAPER_COUNT="${REAPER_COUNT:-1}"
 
@@ -100,6 +103,7 @@ Install / Configure:
   db:drop                      Non-interactively drop MySQL database and runtime user
   db:schema                    Interactively create/reset only indexer schema relations
   db:status                    Check app MySQL login and indexer schema visibility
+  db:cleanup-jobs              Delete terminal D/S/F queue rows covered by search_index_state
   source:status                Check worker source MySQL read access for campaign actions
   show-db-sql                  Print admin SQL for database, user, and grants
   install-service-user         Create the dedicated Linux service user/group
@@ -403,7 +407,9 @@ prompt_value() {
 }
 
 shell_quote() {
-  printf '%q' "$1"
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
+  printf "'%s'" "${value}"
 }
 
 configure() {
@@ -463,7 +469,10 @@ configure() {
   python_bin="$(prompt_value PYTHON_BIN "${VENV_DIR}/bin/python")"
   WORKER_BATCH_SIZE="$(prompt_value WORKER_BATCH_SIZE "${WORKER_BATCH_SIZE}")"
   WORKER_CLAIM_STRATEGY="$(prompt_value WORKER_CLAIM_STRATEGY "${WORKER_CLAIM_STRATEGY}")"
+  WORKER_MAX_RETRIES="$(prompt_value WORKER_MAX_RETRIES "${WORKER_MAX_RETRIES}")"
+  JOB_CLEANUP_BATCH_SIZE="$(prompt_value JOB_CLEANUP_BATCH_SIZE "${JOB_CLEANUP_BATCH_SIZE}")"
   REAPER_STALE_SECONDS="$(prompt_value REAPER_STALE_SECONDS "${REAPER_STALE_SECONDS}")"
+  REAPER_RELEASE_DELAY_SECONDS="$(prompt_value REAPER_RELEASE_DELAY_SECONDS "${REAPER_RELEASE_DELAY_SECONDS}")"
   WORKER_COUNT="$(prompt_value WORKER_COUNT "${WORKER_COUNT}")"
   REAPER_COUNT="$(prompt_value REAPER_COUNT "${REAPER_COUNT}")"
 
@@ -510,6 +519,8 @@ WORKER_BATCH_DELAY_SECONDS=0
 WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE}
 WORKER_CLAIM_STRATEGY=$(shell_quote "${WORKER_CLAIM_STRATEGY}")
 WORKER_RETRY_DELAY_SECONDS=0
+WORKER_MAX_RETRIES=${WORKER_MAX_RETRIES}
+JOB_CLEANUP_BATCH_SIZE=${JOB_CLEANUP_BATCH_SIZE}
 
 DB_RETRY_ATTEMPTS=3
 DB_RETRY_BASE_DELAY_SECONDS=0.1
@@ -519,7 +530,7 @@ REAPER_POLL_INTERVAL_SECONDS=60
 REAPER_BATCH_DELAY_SECONDS=0.5
 REAPER_BATCH_SIZE=1000
 REAPER_STALE_SECONDS=${REAPER_STALE_SECONDS}
-REAPER_RELEASE_DELAY_SECONDS=600
+REAPER_RELEASE_DELAY_SECONDS=${REAPER_RELEASE_DELAY_SECONDS}
 
 WORKER_COUNT=${WORKER_COUNT}
 REAPER_COUNT=${REAPER_COUNT}
@@ -1596,6 +1607,40 @@ db_status() {
   fi
 }
 
+db_cleanup_jobs() {
+  local limit="${1:-${JOB_CLEANUP_BATCH_SIZE}}"
+  local cleaned_count
+
+  require_mysql_client
+  sql_ident "${MYSQL_DATABASE}" >/dev/null
+  validate_positive_int JOB_CLEANUP_BATCH_SIZE "${limit}"
+
+  printf 'Indexer terminal job cleanup\n'
+  printf 'database=%s\n' "${MYSQL_DATABASE}"
+  printf 'limit=%s\n' "${limit}"
+
+  cleaned_count="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "
+DELETE FROM search_index_jobs
+WHERE job_id IN (
+  SELECT job_id
+  FROM (
+    SELECT j.job_id
+    FROM search_index_jobs j
+    JOIN search_index_state s
+      ON s.entity_type = j.entity_type
+     AND s.entity_id = j.entity_id
+    WHERE j.status IN ('D', 'S', 'F')
+      AND j.job_id <= s.last_job_id
+    ORDER BY j.job_id ASC
+    LIMIT ${limit}
+  ) state_covered_terminal_jobs
+);
+SELECT ROW_COUNT();
+")"
+
+  printf 'cleaned_jobs=%s\n' "${cleaned_count}"
+}
+
 source_status() {
   local output
   local table_name
@@ -1762,6 +1807,8 @@ service_user_import_check() {
   fi
 
   if [[ "${output}" == *"sudo: a password is required"* \
+        || "${output}" == *"sudo: interactive authentication is required"* \
+        || "${output}" == *"sudo: A terminal is required"* \
         || "${output}" == *"no new privileges"* \
         || "${output}" == *"unable to run as"* \
         || "${output}" == "" ]]; then
@@ -1817,6 +1864,8 @@ indexer_db_worker_rights_check() {
 START TRANSACTION;
 SELECT COUNT(*) FROM search_index_jobs;
 UPDATE search_index_jobs SET worker_id = worker_id WHERE 1 = 0;
+UPDATE search_index_jobs SET status = 'F' WHERE 1 = 0;
+DELETE FROM search_index_jobs WHERE 1 = 0;
 INSERT INTO search_index_state
   (entity_type, entity_id, index_status, last_action, last_job_id, last_job_created_at, indexed_at)
 VALUES
@@ -1834,7 +1883,7 @@ ROLLBACK;
   printf 'database=%s\n' "${MYSQL_DATABASE}"
 
   if output="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "${sql}" 2>&1)"; then
-    printf 'ok   worker can SELECT/UPDATE queue and INSERT/DELETE state rows\n'
+    printf 'ok   worker can SELECT/UPDATE/DELETE queue and INSERT/DELETE state rows\n'
     return 0
   fi
 
@@ -1977,7 +2026,10 @@ log_file=${LOG_FILE}
 log_dir=$(service_log_dir)
 worker_batch_size=${WORKER_BATCH_SIZE}
 worker_claim_strategy=${WORKER_CLAIM_STRATEGY}
+worker_max_retries=${WORKER_MAX_RETRIES}
+job_cleanup_batch_size=${JOB_CLEANUP_BATCH_SIZE}
 reaper_stale_seconds=${REAPER_STALE_SECONDS}
+reaper_release_delay_seconds=${REAPER_RELEASE_DELAY_SECONDS}
 worker_template=$(worker_template_unit)
 reaper_template=$(reaper_template_unit)
 worker_count=${WORKER_COUNT}
@@ -2368,6 +2420,9 @@ main() {
       ;;
     db:status)
       db_status
+      ;;
+    db:cleanup-jobs)
+      db_cleanup_jobs "${2:-}"
       ;;
     source:status)
       source_status

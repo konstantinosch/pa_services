@@ -1,12 +1,22 @@
-import os
-import socket
-import mysql.connector
-import uuid
 import logging
+import os
 import random
+import socket
 import time
+import uuid
 
-from db.base import STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_SUPERSEDED
+import mysql.connector
+
+from db.base import (
+    STATE_DELETED,
+    STATE_FAILED,
+    STATE_INDEXED,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    STATUS_SUPERSEDED,
+)
 
 
 MYSQL_ERR_LOCK_WAIT_TIMEOUT = 1205
@@ -579,6 +589,394 @@ class MySqlAdapter:
         )
 
 
+    def release_or_fail_batch_by_ids(self, job_ids, error_text, delay_seconds=0, max_retries=10):
+        if not job_ids:
+            return {"released": 0, "failed": 0}
+
+        cur = self.conn.cursor()
+        placeholders = ",".join(["%s"] * len(job_ids))
+
+        try:
+            cur.execute(
+                f"""
+                UPDATE search_index_jobs
+                SET available_at = CASE
+                        WHEN retry_count + 1 >= %s THEN available_at
+                        ELSE NOW() + INTERVAL %s SECOND
+                    END,
+                    status = CASE
+                        WHEN retry_count + 1 >= %s THEN %s
+                        ELSE status
+                    END,
+                    finished_at = CASE
+                        WHEN retry_count + 1 >= %s THEN NOW()
+                        ELSE finished_at
+                    END,
+                    claim_id = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
+                    retry_count = retry_count + 1,
+                    error_text = %s
+                WHERE job_id IN ({placeholders})
+                AND status = %s
+                """,
+                [
+                    max_retries,
+                    delay_seconds,
+                    max_retries,
+                    STATUS_FAILED,
+                    max_retries,
+                    error_text[:1000],
+                ] + job_ids + [STATUS_RUNNING],
+            )
+
+            cur.execute(
+                f"""
+                SELECT
+                    SUM(status = %s) AS failed_count,
+                    SUM(status = %s AND claim_id IS NULL) AS released_count
+                FROM search_index_jobs
+                WHERE job_id IN ({placeholders})
+                """,
+                [STATUS_FAILED, STATUS_RUNNING] + job_ids,
+            )
+            row = cur.fetchone()
+            self.conn.commit()
+            return {
+                "released": int(row[1] or 0),
+                "failed": int(row[0] or 0),
+            }
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def release_or_fail_batch_by_claim(self, claim_id, error_text, delay_seconds=0, max_retries=10):
+        if not claim_id:
+            return {"released": 0, "failed": 0}
+
+        cur = self.conn.cursor()
+
+        try:
+            cur.execute("""
+                SELECT job_id
+                FROM search_index_jobs
+                WHERE claim_id = %s
+                AND status = %s
+                ORDER BY job_id ASC
+                FOR UPDATE
+            """, (claim_id, STATUS_RUNNING))
+
+            job_ids = [row[0] for row in cur.fetchall()]
+
+            if not job_ids:
+                self.conn.commit()
+                return {"released": 0, "failed": 0}
+
+            placeholders = ",".join(["%s"] * len(job_ids))
+
+            cur.execute(
+                f"""
+                UPDATE search_index_jobs
+                SET available_at = CASE
+                        WHEN retry_count + 1 >= %s THEN available_at
+                        ELSE NOW() + INTERVAL %s SECOND
+                    END,
+                    status = CASE
+                        WHEN retry_count + 1 >= %s THEN %s
+                        ELSE status
+                    END,
+                    finished_at = CASE
+                        WHEN retry_count + 1 >= %s THEN NOW()
+                        ELSE finished_at
+                    END,
+                    claim_id = NULL,
+                    worker_id = NULL,
+                    claimed_at = NULL,
+                    started_at = NULL,
+                    retry_count = retry_count + 1,
+                    error_text = %s
+                WHERE job_id IN ({placeholders})
+                AND status = %s
+                """,
+                [
+                    max_retries,
+                    delay_seconds,
+                    max_retries,
+                    STATUS_FAILED,
+                    max_retries,
+                    error_text[:1000],
+                ] + job_ids + [STATUS_RUNNING],
+            )
+
+            cur.execute(
+                f"""
+                SELECT
+                    SUM(status = %s) AS failed_count,
+                    SUM(status = %s AND claim_id IS NULL) AS released_count
+                FROM search_index_jobs
+                WHERE job_id IN ({placeholders})
+                """,
+                [STATUS_FAILED, STATUS_RUNNING] + job_ids,
+            )
+            row = cur.fetchone()
+            self.conn.commit()
+            return {
+                "released": int(row[1] or 0),
+                "failed": int(row[0] or 0),
+            }
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def release_or_fail_batch_once(self, jobs, error_text, delay_seconds=0, max_retries=10):
+        if not jobs:
+            return {"released": 0, "failed": 0}
+
+        max_retries = max(1, int(max_retries))
+        raw_claim_ids = {j.get("claim_id") for j in jobs}
+        claim_ids = {claim_id for claim_id in raw_claim_ids if claim_id}
+
+        if len(claim_ids) > 1 or (claim_ids and None in raw_claim_ids):
+            raise RuntimeError("Batch contains multiple claim_id values")
+
+        if claim_ids:
+            claim_id = claim_ids.pop()
+            return self.release_or_fail_batch_by_claim(
+                claim_id,
+                error_text,
+                delay_seconds,
+                max_retries,
+            )
+
+        job_ids = [j["job_id"] for j in jobs]
+        return self.release_or_fail_batch_by_ids(
+            job_ids,
+            error_text,
+            delay_seconds,
+            max_retries,
+        )
+
+
+    def release_or_fail_batch(self, jobs, error_text, delay_seconds=0, max_retries=10):
+        return self.with_db_retry(
+            "release_or_fail_batch",
+            lambda: self.release_or_fail_batch_once(
+                jobs,
+                error_text,
+                delay_seconds,
+                max_retries,
+            ),
+        )
+
+    def execute_state_upsert(self, cur, job, index_status, error_text=None):
+        indexed_at_expr = "NOW()" if index_status == STATE_INDEXED else "NULL"
+        deleted_at_expr = "NOW()" if index_status == STATE_DELETED else "NULL"
+        failed_at_expr = "NOW()" if index_status == STATE_FAILED else "NULL"
+
+        cur.execute(
+            f"""
+            INSERT INTO search_index_state (
+                entity_type,
+                entity_id,
+                index_status,
+                last_action,
+                last_job_id,
+                last_job_created_at,
+                indexed_at,
+                deleted_at,
+                failed_at,
+                last_error_text
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                {indexed_at_expr},
+                {deleted_at_expr},
+                {failed_at_expr},
+                %s
+            )
+            ON DUPLICATE KEY UPDATE
+                index_status = VALUES(index_status),
+                last_action = VALUES(last_action),
+                last_job_id = VALUES(last_job_id),
+                last_job_created_at = VALUES(last_job_created_at),
+                indexed_at = VALUES(indexed_at),
+                deleted_at = VALUES(deleted_at),
+                failed_at = VALUES(failed_at),
+                last_error_text = VALUES(last_error_text)
+            """,
+            (
+                job["entity_type"],
+                job["entity_id"],
+                index_status,
+                job["action"],
+                job["job_id"],
+                job.get("created_at"),
+                error_text[:1000] if error_text else None,
+            ),
+        )
+
+
+    def mark_state_once(self, job, index_status, error_text=None):
+        cur = self.conn.cursor()
+
+        try:
+            self.execute_state_upsert(cur, job, index_status, error_text)
+            self.conn.commit()
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def mark_state_indexed(self, job):
+        return self.with_db_retry(
+            "mark_state_indexed",
+            lambda: self.mark_state_once(job, STATE_INDEXED),
+        )
+
+
+    def mark_state_deleted(self, job):
+        return self.with_db_retry(
+            "mark_state_deleted",
+            lambda: self.mark_state_once(job, STATE_DELETED),
+        )
+
+
+    def mark_state_failed_once(self, jobs, error_text):
+        if not jobs:
+            return 0
+
+        latest_by_entity = {}
+
+        for job in jobs:
+            key = (job["entity_type"], job["entity_id"])
+            current = latest_by_entity.get(key)
+
+            if current is None or (job["created_at"], job["job_id"]) > (current["created_at"], current["job_id"]):
+                latest_by_entity[key] = job
+
+        cur = self.conn.cursor()
+
+        try:
+            for job in latest_by_entity.values():
+                self.execute_state_upsert(cur, job, STATE_FAILED, error_text)
+
+            self.conn.commit()
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return len(latest_by_entity)
+
+
+    def mark_state_failed(self, jobs, error_text):
+        return self.with_db_retry(
+            "mark_state_failed",
+            lambda: self.mark_state_failed_once(jobs, error_text),
+        )
+
+
+    def cleanup_terminal_jobs_once(self, jobs):
+        if not jobs:
+            return 0
+
+        latest_by_entity = {}
+
+        for job in jobs:
+            key = (job["entity_type"], job["entity_id"])
+            current = latest_by_entity.get(key)
+
+            if current is None or (job["created_at"], job["job_id"]) > (current["created_at"], current["job_id"]):
+                latest_by_entity[key] = job
+
+        cur = self.conn.cursor()
+        cleaned_count = 0
+
+        try:
+            for job in latest_by_entity.values():
+                cur.execute("""
+                    DELETE j
+                    FROM search_index_jobs j
+                    JOIN search_index_state s
+                      ON s.entity_type = j.entity_type
+                     AND s.entity_id = j.entity_id
+                    WHERE j.entity_type = %s
+                      AND j.entity_id = %s
+                      AND j.status IN (%s, %s, %s)
+                      AND j.job_id <= s.last_job_id
+                """, (
+                    job["entity_type"],
+                    job["entity_id"],
+                    STATUS_DONE,
+                    STATUS_SUPERSEDED,
+                    STATUS_FAILED,
+                ))
+                cleaned_count += cur.rowcount
+
+            self.conn.commit()
+            return cleaned_count
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def cleanup_terminal_jobs(self, jobs):
+        return self.with_db_retry(
+            "cleanup_terminal_jobs",
+            lambda: self.cleanup_terminal_jobs_once(jobs),
+        )
+
+
+    def cleanup_state_covered_terminal_jobs_once(self, limit=10000):
+        cur = self.conn.cursor()
+
+        try:
+            cur.execute("""
+                DELETE FROM search_index_jobs
+                WHERE job_id IN (
+                    SELECT job_id
+                    FROM (
+                        SELECT j.job_id
+                        FROM search_index_jobs j
+                        JOIN search_index_state s
+                          ON s.entity_type = j.entity_type
+                         AND s.entity_id = j.entity_id
+                        WHERE j.status IN (%s, %s, %s)
+                          AND j.job_id <= s.last_job_id
+                        ORDER BY j.job_id ASC
+                        LIMIT %s
+                    ) state_covered_terminal_jobs
+                )
+            """, (STATUS_DONE, STATUS_SUPERSEDED, STATUS_FAILED, limit))
+
+            cleaned_count = cur.rowcount
+            self.conn.commit()
+            return cleaned_count
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def cleanup_state_covered_terminal_jobs(self, limit=10000):
+        return self.with_db_retry(
+            "cleanup_state_covered_terminal_jobs",
+            lambda: self.cleanup_state_covered_terminal_jobs_once(limit),
+        )
+
+
     def finalize_batch_once(self, jobs, winner_ids):
         if not jobs:
             return
@@ -603,6 +1001,62 @@ class MySqlAdapter:
         return self.with_db_retry(
             "finalize_batch",
             lambda: self.finalize_batch_once(jobs, winner_ids),
+        )
+
+
+    def finalize_successful_jobs_once(self, jobs, winner_ids, entity_keys):
+        if not jobs or not entity_keys:
+            return
+
+        winner_ids = set(winner_ids)
+        successful_job_ids = [
+            j["job_id"]
+            for j in jobs
+            if (j["entity_type"], j["entity_id"]) in entity_keys
+        ]
+        successful_winner_ids = sorted(set(successful_job_ids) & winner_ids)
+        superseded_ids = sorted(set(successful_job_ids) - winner_ids)
+
+        cur = self.conn.cursor()
+
+        try:
+            if successful_winner_ids:
+                placeholders = ",".join(["%s"] * len(successful_winner_ids))
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE job_id IN ({placeholders})
+                    AND status = %s
+                    """,
+                    [STATUS_DONE] + successful_winner_ids + [STATUS_RUNNING],
+                )
+
+            if superseded_ids:
+                placeholders = ",".join(["%s"] * len(superseded_ids))
+                cur.execute(
+                    f"""
+                    UPDATE search_index_jobs
+                    SET status = %s,
+                        finished_at = NOW()
+                    WHERE job_id IN ({placeholders})
+                    AND status = %s
+                    """,
+                    [STATUS_SUPERSEDED] + superseded_ids + [STATUS_RUNNING],
+                )
+
+            self.conn.commit()
+
+        except Exception:
+            self.conn.rollback()
+            raise
+
+
+    def finalize_successful_jobs(self, jobs, winner_ids, entity_keys):
+        return self.with_db_retry(
+            "finalize_successful_jobs",
+            lambda: self.finalize_successful_jobs_once(jobs, winner_ids, entity_keys),
         )
 
 
@@ -641,7 +1095,7 @@ class MySqlAdapter:
 
         try:
             cur.execute("""
-                SELECT job_id
+                SELECT job_id, entity_type, entity_id, action, created_at
                 FROM search_index_jobs
                 WHERE status = %s
                 AND claim_id IS NOT NULL
@@ -657,6 +1111,7 @@ class MySqlAdapter:
                 self.conn.commit()
                 return 0
 
+            error_text = "Reaped stale running job"
             job_ids = sorted(r["job_id"] for r in rows)
             placeholders = ",".join(["%s"] * len(job_ids))
 
@@ -669,15 +1124,20 @@ class MySqlAdapter:
                     claimed_at = NULL,
                     started_at = NULL,
                     reap_count = reap_count + 1,
-                    error_text = 'Reaped stale running job'
+                    error_text = %s
                 WHERE job_id IN ({placeholders})
                 AND status = %s
                 AND claim_id IS NOT NULL
                 """,
-                [delay_seconds] + job_ids + [STATUS_RUNNING]
+                [delay_seconds, error_text] + job_ids + [STATUS_RUNNING]
             )
 
             count = cur.rowcount
+
+            if count:
+                for row in rows:
+                    self.execute_state_upsert(cur, row, STATE_FAILED, error_text)
+
             self.conn.commit()
             return count
 

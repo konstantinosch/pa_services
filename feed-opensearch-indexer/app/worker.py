@@ -23,8 +23,10 @@ from app.campaign_actions import ENTITY_TYPE as CAMPAIGN_ACTION
 from app.config import (
     WORKER_BATCH_DELAY_SECONDS,
     WORKER_BATCH_SIZE,
+    WORKER_MAX_RETRIES,
     WORKER_POLL_INTERVAL_SECONDS,
     WORKER_RETRY_DELAY_SECONDS,
+    JOB_CLEANUP_BATCH_SIZE,
     LOG_FILE,
     LOG_LEVEL,
     OPENSEARCH_CONFIG,
@@ -33,7 +35,13 @@ from app.config import (
 )
 from app.opensearch_indexer import OpenSearchIndexer
 from app.source_mysql import SourceMySql
-from db.base import ACTION_DELETE, ACTION_INSERT, ACTION_UPDATE
+from db.base import (
+    ACTION_DELETE,
+    ACTION_INSERT,
+    ACTION_UPDATE,
+    STATE_DELETED,
+    STATE_INDEXED,
+)
 from db.factory import create_adapter
 
 
@@ -89,8 +97,7 @@ def process_job(source_db, search_index, job):
     action = job["action"]
 
     if entity_type != CAMPAIGN_ACTION:
-        logging.info("Skipping unsupported entity type: %s", entity_type)
-        return
+        raise RuntimeError(f"Unsupported entity type: {entity_type}")
 
     if action in (ACTION_INSERT, ACTION_UPDATE):
         doc = source_db.fetch_campaign_action_document(entity_id)
@@ -101,14 +108,16 @@ def process_job(source_db, search_index, job):
                 "Deleted campaign_action %s from index because it is missing or not feed_visible",
                 entity_id,
             )
-            return
+            return STATE_DELETED
 
         search_index.upsert_document(doc)
         logging.info("Upserted campaign_action %s into OpenSearch", entity_id)
+        return STATE_INDEXED
 
     elif action == ACTION_DELETE:
         search_index.delete_document(entity_id)
         logging.info("Deleted campaign_action %s from OpenSearch", entity_id)
+        return STATE_DELETED
 
     else:
         raise RuntimeError(f"Unknown action: {action}")
@@ -176,14 +185,105 @@ def main():
             logging.debug("Raw jobs: %s", jobs)
             logging.debug("Collapsed jobs: %s", collapsed)
 
+            successful_entity_keys = set()
+            successful_winner_ids = set()
+            failed_entity_keys = set()
+            failed_errors = []
+
             for job in collapsed:
                 if shutdown_event.is_set():
                     break
 
-                process_job(source_db, search_index, job)
+                entity_key = (job["entity_type"], job["entity_id"])
+
+                try:
+                    state = process_job(source_db, search_index, job)
+                    if state == STATE_INDEXED:
+                        db.mark_state_indexed(job)
+                    elif state == STATE_DELETED:
+                        db.mark_state_deleted(job)
+
+                    successful_entity_keys.add(entity_key)
+                    successful_winner_ids.add(job["job_id"])
+
+                except Exception as error:
+                    failed_entity_keys.add(entity_key)
+                    failed_errors.append(
+                        f"{job['entity_type']}:{job['entity_id']} job_id={job['job_id']}: {error}"
+                    )
+                    logging.exception(
+                        "Worker failed entity: entity_type=%s entity_id=%s job_id=%s",
+                        job["entity_type"],
+                        job["entity_id"],
+                        job["job_id"],
+                    )
 
             if not shutdown_event.is_set():
-                db.finalize_batch(jobs, winner_ids)
+                if failed_entity_keys:
+                    successful_entity_keys -= failed_entity_keys
+                    successful_winner_ids = {
+                        job["job_id"]
+                        for job in collapsed
+                        if (job["entity_type"], job["entity_id"]) in successful_entity_keys
+                    }
+
+                if failed_entity_keys:
+                    db.finalize_successful_jobs(
+                        jobs,
+                        successful_winner_ids,
+                        successful_entity_keys,
+                    )
+                else:
+                    db.finalize_batch(jobs, winner_ids)
+
+                if failed_entity_keys:
+                    failed_jobs = [
+                        job
+                        for job in jobs
+                        if (job["entity_type"], job["entity_id"]) in failed_entity_keys
+                    ]
+                    error_text = "; ".join(failed_errors) or "Worker entity processing failed"
+
+                    try:
+                        failed_state_count = db.mark_state_failed(failed_jobs, error_text)
+                        logging.error(
+                            "Updated failed state rows: entities=%d",
+                            failed_state_count,
+                        )
+                    except Exception:
+                        logging.exception("Failed to update failed state rows")
+
+                    failure_counts = db.release_or_fail_batch(
+                        failed_jobs,
+                        error_text,
+                        WORKER_RETRY_DELAY_SECONDS,
+                        WORKER_MAX_RETRIES,
+                    )
+                    logging.error(
+                        "Handled failed entity jobs: released=%d failed=%d retry_delay=%ss max_retries=%s",
+                        failure_counts["released"],
+                        failure_counts["failed"],
+                        WORKER_RETRY_DELAY_SECONDS,
+                        WORKER_MAX_RETRIES,
+                    )
+
+                try:
+                    scoped_cleaned_count = db.cleanup_terminal_jobs(jobs)
+                    global_cleaned_count = db.cleanup_state_covered_terminal_jobs(
+                        JOB_CLEANUP_BATCH_SIZE,
+                    )
+                    cleaned_count = scoped_cleaned_count + global_cleaned_count
+                    if cleaned_count:
+                        logging.info(
+                            "Cleaned terminal queue rows: scoped=%d global=%d total=%d",
+                            scoped_cleaned_count,
+                            global_cleaned_count,
+                            cleaned_count,
+                        )
+                except Exception:
+                    logging.exception(
+                        "Terminal queue cleanup failed after successful batch finalization"
+                    )
 
             if WORKER_BATCH_DELAY_SECONDS > 0:
                 shutdown_event.wait(WORKER_BATCH_DELAY_SECONDS)
@@ -192,15 +292,27 @@ def main():
             logging.exception("Fatal worker error while processing batch. Shutting down.")
 
             try:
-                released_count = db.release_failed_batch(
+                failed_state_count = db.mark_state_failed(jobs, str(error))
+                logging.error(
+                    "Updated failed state rows: entities=%d",
+                    failed_state_count,
+                )
+            except Exception:
+                logging.exception("Failed to update failed state rows")
+
+            try:
+                failure_counts = db.release_or_fail_batch(
                     jobs,
                     str(error),
                     WORKER_RETRY_DELAY_SECONDS,
+                    WORKER_MAX_RETRIES,
                 )
                 logging.error(
-                    "Released failed batch ownership: jobs=%d retry_delay=%ss",
-                    released_count,
+                    "Handled failed batch: released=%d failed=%d retry_delay=%ss max_retries=%s",
+                    failure_counts["released"],
+                    failure_counts["failed"],
                     WORKER_RETRY_DELAY_SECONDS,
+                    WORKER_MAX_RETRIES,
                 )
             except Exception:
                 logging.exception("Failed to release batch")

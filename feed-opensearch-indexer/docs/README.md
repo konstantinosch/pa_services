@@ -44,30 +44,41 @@ retry_count             processing failures
 reap_count              stale ownership recoveries
 ```
 
-Status meaning:
+Status reference:
 
-```text
-P = pending
-R = running
-D = done
-S = superseded by a newer job for the same entity
-F = failed, planned/defined but not really used yet
-```
+| Status | Name | Meaning |
+| --- | --- | --- |
+| `P` | Pending | Waiting to be claimed by a worker. |
+| `R` | Running | Claimed now or previously claimed for processing. |
+| `D` | Done | Winning job processed successfully. |
+| `S` | Superseded | Older duplicate job skipped because a newer job for the same entity won. |
+| `F` | Failed | Processing failed at least `WORKER_MAX_RETRIES` times and will not be retried automatically. |
+
+Action reference:
+
+| Action | Meaning |
+| --- | --- |
+| `I` | Insert/index this entity. |
+| `U` | Update/rebuild this entity from MySQL. |
+| `D` | Delete this entity from OpenSearch. |
+
+For the current worker, `I` and `U` both mean "refresh this entity from the
+source database."
 
 Ownership is separate from status:
 
-```text
-R + claim_id != NULL = actively owned by a worker
-R + claim_id IS NULL = orphaned/reclaimable running job
-```
+| Status | `claim_id` | Meaning |
+| --- | --- | --- |
+| `R` | not null | Actively owned by a worker. |
+| `R` | null | Orphaned/reclaimable running job. |
 
 This separation was added to avoid repeatedly flipping `R -> P`, which caused
 deadlock-prone index churn in MySQL.
 
 ### `search_index_state`
 
-This table is present in `sql/indexer/schema_mysql.sql`. Worker updates are the
-next implementation step. It keeps one row per indexed source entity:
+This table is present in `sql/indexer/schema_mysql.sql`. It keeps one row per
+indexed source entity:
 
 ```text
 (entity_type, entity_id)
@@ -81,18 +92,26 @@ last error/debug information
 This table acts as the compact "what happened / what is currently indexed"
 ledger.
 
+Workers update it after successful OpenSearch writes:
+
+```text
+indexed = document was upserted into OpenSearch
+deleted = document was removed from OpenSearch, or source row is no longer feed-visible
+failed  = worker processing failed, or the reaper recovered stale ownership
+```
+
 Once `search_index_state` says an entity has been indexed through a given job,
-older terminal job rows for that same entity can be safely deleted:
+the worker deletes older terminal job rows for that same entity:
 
 ```sql
 DELETE FROM search_index_jobs
 WHERE entity_type = ?
   AND entity_id = ?
   AND job_id <= ?
-  AND status IN ('D', 'S');
+  AND status IN ('D', 'S', 'F');
 ```
 
-Do not automatically delete `P`, active `R`, orphaned `R`, or `F` jobs.
+This cleanup intentionally ignores `P`, active `R`, and orphaned `R` jobs.
 
 ## Demo Tables
 
@@ -175,21 +194,28 @@ entities by comparing source tables with `search_index_state`.
 
 ## What Happens To Old Jobs?
 
-Right now, nothing deletes terminal jobs.
+The worker deletes terminal `D`, `S`, and `F` rows after `search_index_state`
+contains the durable checkpoint for that entity.
 
-`D` and `S` rows accumulate. `F` is defined but not actively used.
-
-Intended future model:
+Cleanup has two paths:
 
 ```text
-worker       = indexing work
-reaper       = stale running job recovery
-janitor      = cleanup of old terminal jobs
-state table  = durable per-entity indexing ledger
+entity-scoped cleanup = removes terminal rows for the just-processed batch
+global cleanup        = bounded sweep for older state-covered terminal rows
+state table           = durable per-entity indexing ledger
 ```
 
-Once `search_index_state` exists, cleanup can be immediate and deterministic per
-entity: delete terminal jobs covered by the state checkpoint.
+Manual cleanup command:
+
+```bash
+./feed_opensearch_ctl.sh db:cleanup-jobs
+./feed_opensearch_ctl.sh db:cleanup-jobs 50000
+```
+
+Failed rows are cleaned like other terminal rows once `search_index_state`
+contains the failed checkpoint. Operators can inspect failures from
+`search_index_state`, then requeue them by inserting fresh `P` jobs from that
+state.
 
 ## Current Project Shape
 
@@ -223,12 +249,11 @@ Near-term repo cleanup:
 1. Separate indexer-owned SQL from demo SQL.
 2. Move demo `items` schema/data into `sql/demo/`.
 3. Keep indexer schema in `sql/indexer/schema_mysql.sql`.
-4. Add worker updates for `search_index_state`.
-5. Add cleanup for terminal jobs covered by state.
-6. Add a top-level README or keep this file as the main README.
-7. Move huge chat transcripts into `docs/notes/` or archive them.
-8. Remove or clearly label personal VM/dev setup notes.
-9. Add tests for job collapse and status/state transitions.
+4. Add dead-letter thresholds for exhausted retries/reaps.
+5. Add a top-level README or keep this file as the main README.
+6. Move huge chat transcripts into `docs/notes/` or archive them.
+7. Remove or clearly label personal VM/dev setup notes.
+8. Add tests for job collapse and status/state transitions.
 ```
 
 Possible target structure:
@@ -278,15 +303,13 @@ docs/
 Core functionality:
 
 ```text
-1. Add `search_index_state` updates after successful indexing.
-2. Only delete terminal job rows after state is checkpointed.
-3. Decide how permanent failures become F.
-4. Generalize document builders beyond `campaign_action`.
+1. Only delete terminal job rows after state is checkpointed.
+2. Decide how permanent failures become F.
+3. Generalize document builders beyond `campaign_action`.
 5. Add reconciliation/backfill command:
    - find missing state rows
    - find stale indexed rows
    - enqueue repair jobs
-6. Add janitor cleanup for terminal jobs covered by state.
 ```
 
 Operational tooling:
@@ -341,12 +364,11 @@ sudo systemctl enable --now indexer-worker indexer-reaper
 Known current gaps:
 
 ```text
-1. Worker does not populate `search_index_state` yet.
-2. Worker does not clean claimed terminal jobs after state update yet.
-3. `F` status exists but is not actively used.
-4. Automated tests are still thin.
+1. Automated tests are still thin.
 ```
 
 The concurrency model is now paired with a real campaign action indexing path.
-The next valuable work is making state updates and queue cleanup part of the
-worker finalization chain.
+The worker now updates `search_index_state`, marks queue rows terminal, and
+removes terminal queue rows that are covered by the state checkpoint.
+Repeated worker failures are capped by `WORKER_MAX_RETRIES`; exhausted jobs move
+to `F` and `search_index_state` records `failed`.

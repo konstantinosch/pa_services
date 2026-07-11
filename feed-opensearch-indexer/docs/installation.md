@@ -603,7 +603,8 @@ The recovery model should be:
 ```text
 systemd restarts worker/reaper after reboot
 Docker restarts bundled OpenSearch after reboot
-reaper releases stale running jobs after REAPER_STALE_SECONDS
+reaper releases stale running jobs after REAPER_STALE_SECONDS and waits
+REAPER_RELEASE_DELAY_SECONDS before another worker can reclaim them
 initial loader can rebuild OpenSearch from the source DB if index data is lost
 ```
 

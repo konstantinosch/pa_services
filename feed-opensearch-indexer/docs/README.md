@@ -10,12 +10,13 @@ The important idea:
 ```text
 source DB -> search_index_jobs -> worker -> OpenSearch
                        |
-                       -> search_index_state, planned
+                       -> search_index_state
 ```
 
-The project currently focuses mostly on the job queue / worker coordination
-side. OpenSearch is set up in Docker/docs, but the worker still only logs
-"would upsert/delete" instead of actually writing documents.
+The project combines the job queue / worker coordination layer with the first
+real indexing path for `campaign_action` documents. Workers read change jobs,
+rebuild the current document from the source MySQL database, and upsert/delete
+documents in OpenSearch.
 
 ## Installation
 
@@ -63,12 +64,10 @@ R + claim_id IS NULL = orphaned/reclaimable running job
 This separation was added to avoid repeatedly flipping `R -> P`, which caused
 deadlock-prone index churn in MySQL.
 
-### `search_index_state` Planned
+### `search_index_state`
 
-This table is not implemented yet, but it is the missing piece that explains the
-long-term model.
-
-It should keep one row per indexed source entity:
+This table is present in `sql/indexer/schema_mysql.sql`. Worker updates are the
+next implementation step. It keeps one row per indexed source entity:
 
 ```text
 (entity_type, entity_id)
@@ -77,7 +76,6 @@ last indexed time
 last action
 current indexing status
 last error/debug information
-optional document hash
 ```
 
 This table acts as the compact "what happened / what is currently indexed"
@@ -119,7 +117,7 @@ Current worker flow:
 3. Collapse duplicate jobs by (entity_type, entity_id).
 4. Keep only the latest job per entity as the winner.
 5. Fetch current source DB state for the winner.
-6. Currently log "would upsert/delete".
+6. Upsert/delete the OpenSearch document for `campaign_action`.
 7. Mark winner jobs D.
 8. Mark duplicate jobs S.
 ```
@@ -162,12 +160,12 @@ Example:
 ```sql
 START TRANSACTION;
 
-UPDATE items
-SET title = ?, body = ?
-WHERE item_id = ?;
+UPDATE campaign_actions
+SET feed_visible = 1
+WHERE `index` = ?;
 
 INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
-VALUES ('item', ?, 'U', 0, 'app');
+VALUES ('campaign_action', ?, 'U', 0, 'app');
 
 COMMIT;
 ```
@@ -198,17 +196,20 @@ entity: delete terminal jobs covered by the state checkpoint.
 Important current files:
 
 ```text
-app/daemon.py          worker loop
+app/worker.py          worker loop
 app/reaper.py          stale job ownership recovery
 app/config.py          env-based config
-app/seed_data.py       demo item/job seeding
+app/index_loader.py    initial OpenSearch loader
+app/source_mysql.py    source database reader
+app/opensearch_indexer.py
+                       OpenSearch document writer
 
 db/base.py             action/status constants and adapter interface
 db/mysql_adapter.py    MySQL queue implementation
 db/factory.py          adapter factory
 
-sql/schema_mysql.sql   current indexer job schema
-sql/demo_data.sql      older demo schema with items + jobs
+sql/indexer/schema_mysql.sql
+                       current indexer job/state schema
 
 docker/opensearch/     local OpenSearch docker compose
 docs/                  design notes and setup notes
@@ -222,13 +223,12 @@ Near-term repo cleanup:
 1. Separate indexer-owned SQL from demo SQL.
 2. Move demo `items` schema/data into `sql/demo/`.
 3. Keep indexer schema in `sql/indexer/schema_mysql.sql`.
-4. Add `search_index_state`.
-5. Decide naming: daemon vs worker, reaper vs recovery.
-6. Add real `requirements.txt`.
-7. Add a top-level README or keep this file as the main README.
-8. Move huge chat transcripts into `docs/notes/` or archive them.
-9. Remove or clearly label personal VM/dev setup notes.
-10. Add tests for job collapse and status/state transitions.
+4. Add worker updates for `search_index_state`.
+5. Add cleanup for terminal jobs covered by state.
+6. Add a top-level README or keep this file as the main README.
+7. Move huge chat transcripts into `docs/notes/` or archive them.
+8. Remove or clearly label personal VM/dev setup notes.
+9. Add tests for job collapse and status/state transitions.
 ```
 
 Possible target structure:
@@ -278,10 +278,10 @@ docs/
 Core functionality:
 
 ```text
-1. Implement real OpenSearch upsert/delete adapter.
-2. Only mark jobs D/S after OpenSearch confirms success.
+1. Add `search_index_state` updates after successful indexing.
+2. Only delete terminal job rows after state is checkpointed.
 3. Decide how permanent failures become F.
-4. Add `search_index_state` updates after successful indexing.
+4. Generalize document builders beyond `campaign_action`.
 5. Add reconciliation/backfill command:
    - find missing state rows
    - find stale indexed rows
@@ -292,11 +292,10 @@ Core functionality:
 Operational tooling:
 
 ```text
-1. Add `indexerctl doctor`.
-2. Add config validation.
-3. Add DB/schema validation.
-4. Add safe init-db command.
-5. Avoid destructive schema resets unless an explicit force flag is used.
+1. Harden `feed_opensearch_ctl.sh doctor` for production handoff.
+2. Add deeper config validation.
+3. Add DB/schema drift validation.
+4. Add reconciliation/backfill checks against `search_index_state`.
 ```
 
 Installable service target:
@@ -342,17 +341,12 @@ sudo systemctl enable --now indexer-worker indexer-reaper
 Known current gaps:
 
 ```text
-1. OpenSearch writes are not implemented in the worker.
-2. `items` is demo data, not indexer-owned core schema.
-3. `search_index_state` is not implemented yet.
-4. `F` status exists but is not actively used.
-5. No tests yet.
-6. No real requirements file yet.
-7. No install script/systemd units yet.
-8. Some docs are personal setup notes, not production docs.
-9. The repo currently contains many modified/untracked files.
+1. Worker does not populate `search_index_state` yet.
+2. Worker does not clean claimed terminal jobs after state update yet.
+3. `F` status exists but is not actively used.
+4. Automated tests are still thin.
 ```
 
-The concurrency model is more advanced than the rest of the prototype. That is
-not wrong, but the next valuable work is making the simple single-worker
-indexing path real and making the repo easy to revisit.
+The concurrency model is now paired with a real campaign action indexing path.
+The next valuable work is making state updates and queue cleanup part of the
+worker finalization chain.

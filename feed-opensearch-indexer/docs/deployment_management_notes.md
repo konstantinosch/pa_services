@@ -10,7 +10,7 @@ cd indexer-service-x.y.z
 sudo ./scripts/install.sh
 ```
 
-The install flow should prepare the OS/service environment, but runtime daemons should still fail fast when required configuration or infrastructure is missing.
+The install flow should prepare the OS/service environment, but runtime workers should still fail fast when required configuration or infrastructure is missing.
 
 ---
 
@@ -98,7 +98,7 @@ bin/indexerctl service-install
 - `DB_ENGINE` is supported
 - log directory is writable
 - numeric settings parse correctly
-- daemon/reaper batch sizes and delays are sane
+- worker/reaper batch sizes and delays are sane
 
 `check-db` should verify:
 
@@ -135,7 +135,7 @@ Other SQL files may be test/demo/history files unless explicitly promoted.
 
 ## Runtime Philosophy
 
-Daemon and reaper should stay boring:
+Worker and reaper should stay boring:
 
 - load config
 - connect to DB
@@ -147,7 +147,7 @@ They should create safe runtime directories such as the log directory, but they 
 Retry policy belongs at the right layer:
 
 - adapter retries transient DB transaction conflicts such as deadlocks and lock wait timeouts
-- daemon/reaper handle processing and service lifecycle failures
+- worker/reaper handle processing and service lifecycle failures
 - missing DB/config/schema is fatal and should be fixed by deployment or management commands
 
 ---
@@ -169,6 +169,5 @@ sudo -u indexer indexerctl doctor
 sudo -u indexer indexerctl init-db
 sudo -u indexer indexerctl doctor
 
-sudo systemctl enable --now indexer-daemon indexer-reaper
+sudo systemctl enable --now indexer-worker indexer-reaper
 ```
-

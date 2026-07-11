@@ -9,6 +9,8 @@ from pathlib import Path
 
 import requests
 
+from app.campaign_actions import parse_tags
+
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_SQL_FILE = SERVICE_DIR / "sql" / "opensearch" / "campaign_actions_feed_full_index.sql"
@@ -137,17 +139,12 @@ def mysql_rows(args, sql):
             raise RuntimeError(f"Unexpected mysql row shape: {fields}")
 
         created_at, index, campaign_index, tags = fields
-        try:
-            parsed_tags = json.loads(tags) if tags else []
-        except json.JSONDecodeError:
-            parsed_tags = []
-
         rows.append(
             {
                 "created_at": int(created_at),
                 "index": int(index),
                 "campaign_index": int(campaign_index),
-                "tags": parsed_tags,
+                "tags": parse_tags(tags),
             }
         )
 

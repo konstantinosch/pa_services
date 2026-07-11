@@ -5,9 +5,9 @@ OpenSearch index eventually aligned with the relational source of truth by
 claiming rows from `search_index_jobs`, processing them in batches, and
 recovering stale claims with a separate reaper process.
 
-The current worker still logs the intended upsert/delete operation. The
-installer scaffolding below prepares the project as a deliverable service before
-the real OpenSearch adapter is wired in.
+The worker processes `campaign_action` queue jobs by rebuilding the source
+document from MySQL and upserting or deleting the matching OpenSearch document.
+The installer scaffolding below prepares the project as a deliverable service.
 
 ## Supported Hosts
 
@@ -37,7 +37,10 @@ cd /opt/pa_services/feed-opensearch-indexer
 ./feed_opensearch_ctl.sh configure
 ./feed_opensearch_ctl.sh db:install
 ./feed_opensearch_ctl.sh db:status
+./feed_opensearch_ctl.sh source:status
 ./feed_opensearch_ctl.sh install-service-user
+sudo usermod -aG pa_indexer "$USER"
+newgrp pa_indexer
 ./feed_opensearch_ctl.sh install-systemd
 ./feed_opensearch_ctl.sh install-logrotate
 ./feed_opensearch_ctl.sh fix-permissions
@@ -66,8 +69,40 @@ cd /opt/pa_services/feed-opensearch-indexer
 ./feed_opensearch_ctl.sh db:install
 ./feed_opensearch_ctl.sh db:status
 
+# temporary note - dont forget the pa_indexer db user has to access
+# the host db (deedspot)
+sudo mysql -e "GRANT SELECT ON deedspot.* TO 'pa_indexer'@'localhost'; FLUSH PRIVILEGES;"
+./feed_opensearch_ctl.sh source:status
+
 # If doctor reports "miss command docker", install Docker now.
 # See "Docker Engine Setup" below.
+
+#centos:
+sudo dnf -y install dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo docker run hello-world
+
+
+#Ubuntu
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo docker run hello-world
 
 ./feed_opensearch_ctl.sh opensearch:install
 ./feed_opensearch_ctl.sh opensearch:index:create
@@ -76,16 +111,16 @@ cd /opt/pa_services/feed-opensearch-indexer
 ./feed_opensearch_ctl.sh opensearch:load
 
 ./feed_opensearch_ctl.sh install-service-user
-./feed_opensearch_ctl.sh install-systemd
-./feed_opensearch_ctl.sh install-logrotate
-./feed_opensearch_ctl.sh services:restart
-./feed_opensearch_ctl.sh services:status
 
-# Lock down project permissions after installation/verification.
-# If the deployer account should keep running control commands later:
+# If the deployer account should keep running control commands:
 sudo usermod -aG pa_indexer "$USER"
 newgrp pa_indexer
+
+./feed_opensearch_ctl.sh install-systemd
+./feed_opensearch_ctl.sh install-logrotate
 ./feed_opensearch_ctl.sh fix-permissions
+./feed_opensearch_ctl.sh services:restart
+./feed_opensearch_ctl.sh services:status
 ```
 
 ## Configuration
@@ -124,7 +159,8 @@ The production/application source database. This owns tables such as
 `campaign_actions`, `campaigns_tags`, and `campaign_tags`, and is read when
 building OpenSearch documents.
 
-The default local/development path uses socket-authenticated sudo access:
+The default local/development loader path uses socket-authenticated sudo access
+for bulk loads from the control script:
 
 ```bash
 SOURCE_MYSQL_DATABASE=deedspot
@@ -132,7 +168,10 @@ SOURCE_MYSQL_BIN=mysql
 SOURCE_MYSQL_SUDO=1
 ```
 
-For production, prefer an explicit read-only source DB user and disable sudo:
+The worker service itself uses a normal MySQL client connection. If
+`SOURCE_MYSQL_USER` is empty, it reuses `MYSQL_USER`/`MYSQL_PASSWORD`, which is
+usually `pa_indexer`. Grant that user read access to the source tables, or set
+an explicit read-only source DB user:
 
 ```bash
 SOURCE_MYSQL_HOST=localhost
@@ -206,8 +245,8 @@ To print the database/user/grant SQL without executing it:
 ```
 
 The schema file used by the installer is
-`sql/indexer/schema_mysql.sql`. It creates `search_index_jobs` with
-`CREATE TABLE IF NOT EXISTS`.
+`sql/indexer/schema_mysql.sql`. It creates `search_index_jobs` and
+`search_index_state` with `CREATE TABLE IF NOT EXISTS`.
 
 
 ## Linux Service User
@@ -220,6 +259,13 @@ configuration and before installing systemd units:
 ./feed_opensearch_ctl.sh install-service-user
 ./feed_opensearch_ctl.sh fix-permissions
 ```
+
+Run `fix-permissions` again after changing `config.env`, recopying the project,
+or before restarting services at the end of installation. The services read the
+same config as `pa_indexer`, so this catches the common `config.env: Permission
+denied` failure before the worker starts. It also grants the service group
+traverse permission on the parent install directory, such as `/opt/pa_services`,
+so systemd can reach `feed_opensearch_ctl.sh`.
 
 The generated units use `SERVICE_USER` and `SERVICE_GROUP`, both defaulting to
 `pa_indexer`.
@@ -241,12 +287,24 @@ Preview the unit files without installing:
 Start and inspect services:
 
 ```bash
-./feed_opensearch_ctl.sh services:start
+./feed_opensearch_ctl.sh fix-permissions
+./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
 ./feed_opensearch_ctl.sh services:logs
-./feed_opensearch_ctl.sh services:restart
+./feed_opensearch_ctl.sh services:logs:follow
 ./feed_opensearch_ctl.sh services:stop
 ```
+
+Journal commands show the latest 100 lines by default. Override with
+`JOURNAL_LINES`:
+
+```bash
+JOURNAL_LINES=300 ./feed_opensearch_ctl.sh worker:logs
+JOURNAL_LINES=50 ./feed_opensearch_ctl.sh services:logs:follow
+```
+
+For live monitoring across all configured worker and reaper instances, prefer
+`services:logs:follow`.
 
 The service uses systemd template instances. Multiplicity is controlled in
 `config.env`:
@@ -333,7 +391,7 @@ CentOS/RHEL-like hosts:
 ```bash
 sudo dnf -y install dnf-plugins-core
 sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-sudo dnf install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo docker run hello-world
 ```
@@ -472,6 +530,51 @@ using document id `index`. Page size is controlled by:
 OPENSEARCH_LOADER_PAGE_SIZE=10000
 ```
 
+## Incremental OpenSearch Jobs
+
+After the initial load, application code should enqueue changed source rows in
+the indexer database:
+
+```sql
+INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+VALUES ('campaign_action', '12345', 'U', 0, 'app');
+```
+
+Supported actions are:
+
+- `I` and `U`: rebuild the full campaign action document from the source DB and
+  upsert it into OpenSearch.
+- `D`: delete the OpenSearch document with `_id = entity_id`.
+
+For `I`/`U`, if the source row no longer exists or `feed_visible = 0`, the
+worker deletes the OpenSearch document instead of indexing stale data. The
+worker uses the same document shape as the bulk loader:
+
+```json
+{
+  "created_at": 1778284800,
+  "index": 100000000,
+  "campaign_index": 123,
+  "tags": [1, 2, 3]
+}
+```
+
+`feed_visible` is a stored generated column on `campaign_actions`. It is true
+only when the action is globally feed-visible:
+
+```text
+created_at IS NOT NULL
+status = 'open'
+type = 'external'
+campaign_is_public = 1
+campaign_status IN ('active', 'completed')
+```
+
+For a narrow local delete/upsert test, flip the action `status` away from
+`open`, enqueue a `U` job, and the worker should delete the OpenSearch document.
+Then restore `status = 'open'`, enqueue another `U`, and the document should
+come back.
+
 ## Operations And Monitoring
 
 After installation, operators need a quick way to understand whether the service
@@ -557,6 +660,6 @@ uses an external OpenSearch service instead of the bundled local container.
 ## Current Installer Boundary
 
 This installer pass can start bundled local OpenSearch, create/reset the first
-`campaign_actions_feed` index, and run an initial rebuild/load from the source
-database. The actual worker still needs the real OpenSearch adapter and
-entity-specific PHP enqueue hooks before it performs live upserts/deletes.
+`campaign_actions_feed` index, run an initial rebuild/load from the source
+database, and run worker/reaper services for live queue processing. Application
+PHP enqueue hooks are still the main integration piece outside this service.

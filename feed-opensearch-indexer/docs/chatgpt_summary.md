@@ -1,9 +1,9 @@
-🧠 INDEXING SYSTEM DESIGN SUMMARY (Daemon + Reaper Architecture)
+🧠 INDEXING SYSTEM DESIGN SUMMARY (Worker + Reaper Architecture)
 1️⃣ 🎯 Στόχος συστήματος
 
 Ασύγχρονο indexing pipeline:
 
-DB → Jobs table → Workers (daemon) → OpenSearch
+DB → Jobs table → Workers → OpenSearch
 
 με requirements:
 
@@ -56,7 +56,7 @@ claim_id = NULL  → orphan
 P                     → ready
 R + claim_id != NULL  → actively processed
 R + claim_id IS NULL  → orphan (reclaimable)
-4️⃣ ⚙️ Daemon (Worker)
+4️⃣ ⚙️ Worker
 Responsibilities
 1. fetch jobs
 2. claim them
@@ -106,7 +106,7 @@ R → P
 → caused:
 
 index rewrite
-daemon conflict
+worker conflict
 deadlocks
 ✅ FINAL DESIGN (BREAKTHROUGH)
 R claimed → R orphan
@@ -127,7 +127,7 @@ reaper does NOT change status
 reaper only releases ownership
 6️⃣ 💣 Deadlock Investigation Summary
 ❌ Deadlock #1 (Initial)
-daemon UPDATE JOIN
+worker UPDATE JOIN
 vs
 reaper UPDATE
 
@@ -138,7 +138,7 @@ JOIN UPDATE on same table
 ❌ Deadlock #2
 reaper R → P (status change)
 vs
-daemon SELECT FOR UPDATE
+worker SELECT FOR UPDATE
 
 Cause:
 
@@ -214,7 +214,7 @@ System now supports:
 1️⃣4️⃣ 🧠 Mental Model (FINAL)
 Queue = set of jobs
 
-Daemon:
+Worker:
   picks work
   owns via claim_id
 
@@ -235,7 +235,7 @@ but a distributed coordination system
 classic database concurrency traps
 🧾 TL;DR (για νέο chat)
 We built a MySQL-backed job queue with:
-- daemon workers (claim/process/finalize)
+- workers (claim/process/finalize)
 - reaper (recover stale jobs)
 
 Key design:

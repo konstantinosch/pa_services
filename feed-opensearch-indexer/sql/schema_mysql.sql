@@ -44,7 +44,7 @@ CREATE TABLE search_index_jobs (
         job_id
     ),
 
-    -- Monitoring/debug by daemon instance
+    -- Monitoring/debug by worker instance
     INDEX idx_jobs_worker_status (
         worker_id,
         status

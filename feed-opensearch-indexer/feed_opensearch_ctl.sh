@@ -33,6 +33,7 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   fi
 fi
 
+BASH_BIN="${BASH_BIN:-/usr/bin/bash}"
 DB_ENGINE="${DB_ENGINE:-mysql}"
 MYSQL_HOST="${MYSQL_HOST:-localhost}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
@@ -63,8 +64,8 @@ OPENSEARCH_INITIAL_ADMIN_PASSWORD="${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Pa_OpenS
 OPENSEARCH_LOADER_PAGE_SIZE="${OPENSEARCH_LOADER_PAGE_SIZE:-10000}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_FILE="${LOG_FILE:-logs/pa_opensearch_indexer.log}"
-DAEMON_BATCH_SIZE="${DAEMON_BATCH_SIZE:-100}"
-DAEMON_CLAIM_STRATEGY="${DAEMON_CLAIM_STRATEGY:-simple}"
+WORKER_BATCH_SIZE="${WORKER_BATCH_SIZE:-100}"
+WORKER_CLAIM_STRATEGY="${WORKER_CLAIM_STRATEGY:-simple}"
 REAPER_STALE_SECONDS="${REAPER_STALE_SECONDS:-600}"
 WORKER_COUNT="${WORKER_COUNT:-1}"
 REAPER_COUNT="${REAPER_COUNT:-1}"
@@ -99,6 +100,7 @@ Install / Configure:
   db:drop               Non-interactively drop MySQL database and runtime user
   db:schema             Interactively create/reset only indexer schema relations
   db:status             Check app MySQL login and indexer schema visibility
+  source:status         Check worker source MySQL read access for campaign actions
   show-db-sql           Print admin SQL for database, user, and grants
   install-service-user  Create the dedicated Linux service user/group
   fix-permissions       Apply service-user ownership and private config permissions
@@ -140,16 +142,19 @@ Indexer:
   worker:restart        Restart worker systemd service
   worker:status         Show configured worker systemd instance status
   worker:logs           Show worker systemd journal logs
+  worker:logs:follow    Follow worker systemd journal logs
   reaper:start          Start reaper systemd service
   reaper:stop           Stop reaper systemd service
   reaper:restart        Restart reaper systemd service
   reaper:status         Show configured reaper systemd instance status
   reaper:logs           Show reaper systemd journal logs
+  reaper:logs:follow    Follow reaper systemd journal logs
   services:start        Start worker and reaper services
   services:stop         Stop worker and reaper services
   services:restart      Restart worker and reaper services
   services:status       Show worker and reaper service status
   services:logs         Show worker and reaper systemd journal logs
+  services:logs:follow  Follow worker and reaper systemd journal logs
 
 Project:
   config                Print resolved project paths and command settings
@@ -183,6 +188,30 @@ mysql_app() {
     -h "${MYSQL_HOST}" \
     -P "${MYSQL_PORT}" \
     -u "${MYSQL_USER}" \
+    "$@"
+}
+
+source_mysql_worker_user() {
+  if [[ -n "${SOURCE_MYSQL_USER}" ]]; then
+    printf '%s\n' "${SOURCE_MYSQL_USER}"
+  else
+    printf '%s\n' "${MYSQL_USER}"
+  fi
+}
+
+source_mysql_worker_password() {
+  if [[ -n "${SOURCE_MYSQL_PASSWORD}" ]]; then
+    printf '%s\n' "${SOURCE_MYSQL_PASSWORD}"
+  else
+    printf '%s\n' "${MYSQL_PASSWORD}"
+  fi
+}
+
+source_mysql_worker() {
+  MYSQL_PWD="$(source_mysql_worker_password)" "${SOURCE_MYSQL_BIN}" \
+    -h "${SOURCE_MYSQL_HOST}" \
+    -P "${SOURCE_MYSQL_PORT}" \
+    -u "$(source_mysql_worker_user)" \
     "$@"
 }
 
@@ -434,8 +463,8 @@ configure() {
   fi
   log_file="$(prompt_value LOG_FILE "${LOG_FILE}")"
   python_bin="$(prompt_value PYTHON_BIN "${VENV_DIR}/bin/python")"
-  DAEMON_BATCH_SIZE="$(prompt_value DAEMON_BATCH_SIZE "${DAEMON_BATCH_SIZE}")"
-  DAEMON_CLAIM_STRATEGY="$(prompt_value DAEMON_CLAIM_STRATEGY "${DAEMON_CLAIM_STRATEGY}")"
+  WORKER_BATCH_SIZE="$(prompt_value WORKER_BATCH_SIZE "${WORKER_BATCH_SIZE}")"
+  WORKER_CLAIM_STRATEGY="$(prompt_value WORKER_CLAIM_STRATEGY "${WORKER_CLAIM_STRATEGY}")"
   REAPER_STALE_SECONDS="$(prompt_value REAPER_STALE_SECONDS "${REAPER_STALE_SECONDS}")"
   WORKER_COUNT="$(prompt_value WORKER_COUNT "${WORKER_COUNT}")"
   REAPER_COUNT="$(prompt_value REAPER_COUNT "${REAPER_COUNT}")"
@@ -478,11 +507,11 @@ PYTHON_BIN=$(shell_quote "${python_bin}")
 LOG_LEVEL=$(shell_quote "${LOG_LEVEL}")
 LOG_FILE=$(shell_quote "${log_file}")
 
-DAEMON_POLL_INTERVAL_SECONDS=2
-DAEMON_BATCH_DELAY_SECONDS=0
-DAEMON_BATCH_SIZE=${DAEMON_BATCH_SIZE}
-DAEMON_CLAIM_STRATEGY=$(shell_quote "${DAEMON_CLAIM_STRATEGY}")
-DAEMON_RETRY_DELAY_SECONDS=0
+WORKER_POLL_INTERVAL_SECONDS=2
+WORKER_BATCH_DELAY_SECONDS=0
+WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE}
+WORKER_CLAIM_STRATEGY=$(shell_quote "${WORKER_CLAIM_STRATEGY}")
+WORKER_RETRY_DELAY_SECONDS=0
 
 DB_RETRY_ATTEMPTS=3
 DB_RETRY_BASE_DELAY_SECONDS=0.1
@@ -544,28 +573,45 @@ install_service_user() {
 
 fix_permissions() {
   local log_dir
+  local service_parent
   log_dir="$(service_log_dir)"
+  service_parent="$(dirname "${SERVICE_DIR}")"
 
   if [[ "$(id -u)" -eq 0 ]]; then
     mkdir -p "${log_dir}"
+    if [[ "${service_parent}" != "/" && "${service_parent}" != "." ]]; then
+      chgrp "${SERVICE_GROUP}" "${service_parent}"
+      chmod g+rx "${service_parent}"
+    fi
     chgrp -R "${SERVICE_GROUP}" "${SERVICE_DIR}"
     chmod -R g+rX,o-rwx "${SERVICE_DIR}"
     chmod 750 "${SERVICE_DIR}"
     chmod 750 "${SERVICE_DIR}/feed_opensearch_ctl.sh"
-    [[ -f "${CONFIG_FILE}" ]] && chmod 640 "${CONFIG_FILE}"
+    if [[ -f "${CONFIG_FILE}" ]]; then
+      chgrp "${SERVICE_GROUP}" "${CONFIG_FILE}"
+      chmod 640 "${CONFIG_FILE}"
+    fi
     chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${log_dir}"
     chmod 750 "${log_dir}"
   else
     sudo mkdir -p "${log_dir}"
+    if [[ "${service_parent}" != "/" && "${service_parent}" != "." ]]; then
+      sudo chgrp "${SERVICE_GROUP}" "${service_parent}"
+      sudo chmod g+rx "${service_parent}"
+    fi
     sudo chgrp -R "${SERVICE_GROUP}" "${SERVICE_DIR}"
     sudo chmod -R g+rX,o-rwx "${SERVICE_DIR}"
     sudo chmod 750 "${SERVICE_DIR}"
     sudo chmod 750 "${SERVICE_DIR}/feed_opensearch_ctl.sh"
-    [[ -f "${CONFIG_FILE}" ]] && sudo chmod 640 "${CONFIG_FILE}"
+    if [[ -f "${CONFIG_FILE}" ]]; then
+      sudo chgrp "${SERVICE_GROUP}" "${CONFIG_FILE}"
+      sudo chmod 640 "${CONFIG_FILE}"
+    fi
     sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${log_dir}"
     sudo chmod 750 "${log_dir}"
   fi
 
+  log_info "Applied service traverse permissions for ${SERVICE_GROUP} on ${service_parent}"
   log_info "Applied service read permissions for ${SERVICE_GROUP} under ${SERVICE_DIR}"
   log_info "Applied service write ownership for ${SERVICE_USER}:${SERVICE_GROUP} under ${log_dir}"
   if [[ "$(id -u)" -ne 0 ]] && ! id -nG | tr ' ' '\n' | grep -qx "${SERVICE_GROUP}"; then
@@ -663,7 +709,7 @@ Group=${group}
 WorkingDirectory=${SERVICE_DIR}
 Environment=FEED_OPENSEARCH_CONFIG=${CONFIG_FILE}
 Environment=FEED_OPENSEARCH_INSTANCE=%i
-ExecStart=${SERVICE_DIR}/feed_opensearch_ctl.sh ${command_name}
+ExecStart=${BASH_BIN} ${SERVICE_DIR}/feed_opensearch_ctl.sh ${command_name}
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
@@ -725,8 +771,41 @@ journal_unit() {
   fi
 }
 
+journal_unit_follow() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    journalctl -u "$1" -n "${JOURNAL_LINES:-100}" -f
+  else
+    sudo journalctl -u "$1" -n "${JOURNAL_LINES:-100}" -f
+  fi
+}
+
 journal_unit_action() {
   journal_unit "$1"
+}
+
+journal_unit_follow_action() {
+  journal_unit_follow "$1"
+}
+
+journal_services_follow() {
+  local args=()
+  local i
+
+  validate_instance_counts
+
+  for (( i = 1; i <= WORKER_COUNT; i++ )); do
+    args+=(-u "$(worker_instance_unit "${i}")")
+  done
+
+  for (( i = 1; i <= REAPER_COUNT; i++ )); do
+    args+=(-u "$(reaper_instance_unit "${i}")")
+  done
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    journalctl "${args[@]}" -n "${JOURNAL_LINES:-100}" -f
+  else
+    sudo journalctl "${args[@]}" -n "${JOURNAL_LINES:-100}" -f
+  fi
 }
 
 legacy_disable_remove() {
@@ -1242,7 +1321,8 @@ apply_user_action() {
 
 apply_schema_action() {
   local action="$1"
-  local table_ident='`search_index_jobs`'
+  local job_table_ident='`search_index_jobs`'
+  local state_table_ident='`search_index_state`'
 
   case "${action}" in
     skip)
@@ -1254,7 +1334,7 @@ apply_schema_action() {
       ;;
     drop-recreate)
       confirm_exact "Type ${MYSQL_DATABASE} to DROP and recreate indexer schema in ${MYSQL_DATABASE}" "${MYSQL_DATABASE}"
-      mysql_admin "${MYSQL_DATABASE}" -e "DROP TABLE IF EXISTS ${table_ident};"
+      mysql_admin "${MYSQL_DATABASE}" -e "DROP TABLE IF EXISTS ${state_table_ident}; DROP TABLE IF EXISTS ${job_table_ident};"
       mysql_admin "${MYSQL_DATABASE}" < "${INDEXER_SCHEMA_FILE}"
       log_info "Schema recreated from ${INDEXER_SCHEMA_FILE}"
       ;;
@@ -1262,10 +1342,11 @@ apply_schema_action() {
 }
 
 drop_indexer_schema() {
-  local table_ident='`search_index_jobs`'
+  local job_table_ident='`search_index_jobs`'
+  local state_table_ident='`search_index_state`'
 
   confirm_exact "Type ${MYSQL_DATABASE} to DROP indexer schema table(s) in ${MYSQL_DATABASE}" "${MYSQL_DATABASE}"
-  mysql_admin "${MYSQL_DATABASE}" -e "DROP TABLE IF EXISTS ${table_ident};"
+  mysql_admin "${MYSQL_DATABASE}" -e "DROP TABLE IF EXISTS ${state_table_ident}; DROP TABLE IF EXISTS ${job_table_ident};"
   log_info "Dropped indexer schema table(s) from ${MYSQL_DATABASE}"
 }
 
@@ -1478,7 +1559,8 @@ db_schema() {
 
 db_status() {
   local output
-  local table_count
+  local jobs_table_count
+  local state_table_count
   local queue_count
 
   require_mysql_client
@@ -1497,13 +1579,62 @@ db_status() {
   fi
   printf 'ok   runtime login/query\n'
 
-  table_count="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'search_index_jobs';")"
-  if [[ "${table_count}" == "1" ]]; then
+  jobs_table_count="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'search_index_jobs';")"
+  if [[ "${jobs_table_count}" == "1" ]]; then
     printf 'ok   table search_index_jobs exists\n'
     queue_count="$(mysql_app "${MYSQL_DATABASE}" -N -B -e 'SELECT COUNT(*) FROM search_index_jobs;')"
     printf 'ok   queue rows=%s\n' "${queue_count}"
   else
     printf 'miss table search_index_jobs\n'
+    return 1
+  fi
+
+  state_table_count="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'search_index_state';")"
+  if [[ "${state_table_count}" == "1" ]]; then
+    printf 'ok   table search_index_state exists\n'
+  else
+    printf 'miss table search_index_state\n'
+    return 1
+  fi
+}
+
+source_status() {
+  local output
+  local table_name
+  local failed=0
+
+  if ! command_exists "${SOURCE_MYSQL_BIN}"; then
+    log_error "source mysql command is missing: ${SOURCE_MYSQL_BIN}"
+    return 1
+  fi
+  sql_ident "${SOURCE_MYSQL_DATABASE}" >/dev/null
+
+  printf 'Source MySQL worker-read status\n'
+  printf 'host=%s\n' "${SOURCE_MYSQL_HOST}"
+  printf 'port=%s\n' "${SOURCE_MYSQL_PORT}"
+  printf 'user=%s\n' "$(source_mysql_worker_user)"
+  printf 'database=%s\n' "${SOURCE_MYSQL_DATABASE}"
+  printf 'password_set=%s\n' "$([[ -n "$(source_mysql_worker_password)" ]] && printf yes || printf no)"
+
+  if ! output="$(source_mysql_worker "${SOURCE_MYSQL_DATABASE}" -N -B -e 'SELECT 1;' 2>&1)"; then
+    printf 'fail source login/query: %s\n' "${output}"
+    return 1
+  fi
+  printf 'ok   source login/query\n'
+
+  for table_name in campaign_actions campaigns_tags campaign_tags; do
+    if output="$(source_mysql_worker "${SOURCE_MYSQL_DATABASE}" -N -B -e "SELECT 1 FROM \`${table_name}\` LIMIT 1;" 2>&1)"; then
+      printf 'ok   source SELECT %s\n' "${table_name}"
+    else
+      printf 'fail source SELECT %s: %s\n' "${table_name}" "${output}"
+      failed=1
+    fi
+  done
+
+  if [[ "${failed}" -ne 0 ]]; then
+    printf 'hint grant worker source reads, for local tests:\n'
+    printf "     sudo mysql -e \"GRANT SELECT ON %s.* TO '%s'@'localhost'; FLUSH PRIVILEGES;\"\n" \
+      "${SOURCE_MYSQL_DATABASE}" "$(source_mysql_worker_user)"
     return 1
   fi
 }
@@ -1516,6 +1647,7 @@ compose_file=${COMPOSE_FILE}
 venv_dir=${VENV_DIR}
 requirements_file=${REQUIREMENTS_FILE}
 python_bin=${PYTHON_BIN}
+bash_bin=${BASH_BIN}
 os_family=$(detect_os_family)
 package_manager=$(package_manager)
 db_engine=${DB_ENGINE}
@@ -1551,8 +1683,8 @@ opensearch_full_index_sql_file=${OPENSEARCH_FULL_INDEX_SQL_FILE}
 indexer_schema_file=${INDEXER_SCHEMA_FILE}
 log_file=${LOG_FILE}
 log_dir=$(service_log_dir)
-daemon_batch_size=${DAEMON_BATCH_SIZE}
-daemon_claim_strategy=${DAEMON_CLAIM_STRATEGY}
+worker_batch_size=${WORKER_BATCH_SIZE}
+worker_claim_strategy=${WORKER_CLAIM_STRATEGY}
 reaper_stale_seconds=${REAPER_STALE_SECONDS}
 worker_template=$(worker_template_unit)
 reaper_template=$(reaper_template_unit)
@@ -1612,6 +1744,90 @@ doctor_check_file() {
   fi
 }
 
+doctor_check_service_config_access() {
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    return
+  fi
+
+  if ! command_exists stat || ! command_exists id; then
+    return
+  fi
+
+  if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    return
+  fi
+
+  local mode owner group owner_digit group_digit other_digit
+  mode="$(stat -c '%a' "${CONFIG_FILE}")"
+  owner="$(stat -c '%U' "${CONFIG_FILE}")"
+  group="$(stat -c '%G' "${CONFIG_FILE}")"
+  mode="${mode: -3}"
+  owner_digit="${mode:0:1}"
+  group_digit="${mode:1:1}"
+  other_digit="${mode:2:1}"
+
+  if [[ "${owner}" == "${SERVICE_USER}" ]] && (( owner_digit & 4 )); then
+    printf 'ok   config readable by service user %s\n' "${SERVICE_USER}"
+    return
+  fi
+
+  if id -nG "${SERVICE_USER}" | tr ' ' '\n' | grep -qx "${group}" && (( group_digit & 4 )); then
+    printf 'ok   config readable by service user %s via group %s\n' "${SERVICE_USER}" "${group}"
+    return
+  fi
+
+  if (( other_digit & 4 )); then
+    printf 'ok   config readable by service user %s via other-read\n' "${SERVICE_USER}"
+    return
+  fi
+
+  printf 'miss config readable by service user %s\n' "${SERVICE_USER}"
+  printf 'hint run: ./feed_opensearch_ctl.sh fix-permissions\n'
+}
+
+doctor_check_service_parent_access() {
+  local service_parent mode owner group owner_digit group_digit other_digit
+  service_parent="$(dirname "${SERVICE_DIR}")"
+
+  if [[ "${service_parent}" == "/" || "${service_parent}" == "." ]]; then
+    return
+  fi
+
+  if ! command_exists stat || ! command_exists id; then
+    return
+  fi
+
+  if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    return
+  fi
+
+  mode="$(stat -c '%a' "${service_parent}")"
+  owner="$(stat -c '%U' "${service_parent}")"
+  group="$(stat -c '%G' "${service_parent}")"
+  mode="${mode: -3}"
+  owner_digit="${mode:0:1}"
+  group_digit="${mode:1:1}"
+  other_digit="${mode:2:1}"
+
+  if [[ "${owner}" == "${SERVICE_USER}" ]] && (( owner_digit & 1 )); then
+    printf 'ok   service user %s can traverse %s\n' "${SERVICE_USER}" "${service_parent}"
+    return
+  fi
+
+  if id -nG "${SERVICE_USER}" | tr ' ' '\n' | grep -qx "${group}" && (( group_digit & 1 )); then
+    printf 'ok   service user %s can traverse %s via group %s\n' "${SERVICE_USER}" "${service_parent}" "${group}"
+    return
+  fi
+
+  if (( other_digit & 1 )); then
+    printf 'ok   service user %s can traverse %s via other-execute\n' "${SERVICE_USER}" "${service_parent}"
+    return
+  fi
+
+  printf 'miss service user %s can traverse %s\n' "${SERVICE_USER}" "${service_parent}"
+  printf 'hint run: ./feed_opensearch_ctl.sh fix-permissions\n'
+}
+
 doctor_check_password() {
   if [[ -n "${MYSQL_PASSWORD}" ]]; then
     printf 'ok   MYSQL_PASSWORD is set\n'
@@ -1627,6 +1843,32 @@ doctor_check_password() {
     printf 'warn SOURCE_MYSQL_USER is empty; loader requires SOURCE_MYSQL_USER or SOURCE_MYSQL_SUDO=1\n'
   fi
 }
+
+doctor_check_source_mysql_access() {
+  local output
+
+  DOCTOR_SOURCE_MYSQL_OK=0
+
+  if ! command_exists "${SOURCE_MYSQL_BIN}"; then
+    printf 'miss source mysql command %s\n' "${SOURCE_MYSQL_BIN}"
+    return
+  fi
+
+  if [[ ! "${SOURCE_MYSQL_DATABASE}" =~ ^[A-Za-z0-9_]+$ ]]; then
+    printf 'warn source database name is unsafe for preflight: %s\n' "${SOURCE_MYSQL_DATABASE}"
+    return
+  fi
+
+  if output="$(source_mysql_worker "${SOURCE_MYSQL_DATABASE}" -N -B -e \
+      'SELECT 1 FROM `campaign_actions` LIMIT 1; SELECT 1 FROM `campaigns_tags` LIMIT 1; SELECT 1 FROM `campaign_tags` LIMIT 1;' 2>&1)"; then
+    printf 'ok   source worker read access for campaign action documents\n'
+    DOCTOR_SOURCE_MYSQL_OK=1
+  else
+    printf 'warn source worker read access failed: %s\n' "${output}"
+    printf 'hint run: ./feed_opensearch_ctl.sh source:status\n'
+  fi
+}
+
 doctor_check_service() {
   local service_name="$1"
   if ! command_exists systemctl; then
@@ -1641,8 +1883,52 @@ doctor_check_service() {
   fi
 }
 
+doctor_check_service_instances() {
+  local unit
+  local state
+  local i
+  local failed=0
+
+  DOCTOR_SERVICE_INSTANCES_OK=1
+
+  if ! command_exists systemctl; then
+    DOCTOR_SERVICE_INSTANCES_OK=0
+    return
+  fi
+
+  validate_instance_counts
+
+  for (( i = 1; i <= WORKER_COUNT; i++ )); do
+    unit="$(worker_instance_unit "${i}")"
+    if systemctl is-active --quiet "${unit}"; then
+      printf 'ok   systemd instance active %s\n' "${unit}"
+    else
+      state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+      printf 'warn systemd instance not active %s state=%s\n' "${unit}" "${state:-unknown}"
+      failed=1
+    fi
+  done
+
+  for (( i = 1; i <= REAPER_COUNT; i++ )); do
+    unit="$(reaper_instance_unit "${i}")"
+    if systemctl is-active --quiet "${unit}"; then
+      printf 'ok   systemd instance active %s\n' "${unit}"
+    else
+      state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+      printf 'warn systemd instance not active %s state=%s\n' "${unit}" "${state:-unknown}"
+      failed=1
+    fi
+  done
+
+  if [[ "${failed}" -ne 0 ]]; then
+    DOCTOR_SERVICE_INSTANCES_OK=0
+  fi
+}
+
 doctor() {
   printf 'Feed OpenSearch Indexer doctor\n'
+  DOCTOR_SERVICE_INSTANCES_OK=0
+  DOCTOR_SOURCE_MYSQL_OK=0
   printf 'os_family=%s\n' "$(detect_os_family)"
   printf 'package_manager=%s\n' "$(package_manager)"
   doctor_check_command python3
@@ -1661,6 +1947,7 @@ doctor() {
   doctor_check_command logrotate
   doctor_check_docker_access
   doctor_check_password
+  doctor_check_source_mysql_access
   if command_exists getent; then
     if getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
       printf 'ok   service user %s\n' "${SERVICE_USER}"
@@ -1671,6 +1958,8 @@ doctor() {
     printf 'miss command getent\n'
   fi
   doctor_check_file config "${CONFIG_FILE}"
+  doctor_check_service_parent_access
+  doctor_check_service_config_access
   doctor_check_file requirements "${REQUIREMENTS_FILE}"
   doctor_check_file indexer_schema "${INDEXER_SCHEMA_FILE}"
   doctor_check_file compose "${COMPOSE_FILE}"
@@ -1684,6 +1973,7 @@ doctor() {
   fi
   doctor_check_service "$(worker_template_unit)"
   doctor_check_service "$(reaper_template_unit)"
+  doctor_check_service_instances
   printf 'configured workers=%s
 ' "${WORKER_COUNT}"
   printf 'configured reapers=%s
@@ -1692,37 +1982,55 @@ doctor() {
 }
 
 doctor_next_steps() {
-  printf '\nNext steps:\n'
+  local printed=0
+
+  maybe_print_next_step() {
+    if [[ "${printed}" -eq 0 ]]; then
+      printf '\nNext steps:\n'
+      printed=1
+    fi
+    printf '  - %s\n' "$1"
+  }
 
   if [[ ! -f "${CONFIG_FILE}" ]]; then
-    printf '  - Create config: ./feed_opensearch_ctl.sh init-config or ./feed_opensearch_ctl.sh configure\n'
+    maybe_print_next_step 'Create config: ./feed_opensearch_ctl.sh init-config or ./feed_opensearch_ctl.sh configure'
   fi
 
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    printf '  - Create Python venv: ./feed_opensearch_ctl.sh setup-venv\n'
+    maybe_print_next_step 'Create Python venv: ./feed_opensearch_ctl.sh setup-venv'
   fi
 
-  if command_exists docker; then
-    printf '  - Optional local OpenSearch: ./feed_opensearch_ctl.sh opensearch:install && ./feed_opensearch_ctl.sh opensearch:index:create\n'
+  if command_exists docker && ! opensearch_index_exists; then
+    maybe_print_next_step 'Optional local OpenSearch if using bundled Docker: ./feed_opensearch_ctl.sh opensearch:install && ./feed_opensearch_ctl.sh opensearch:index:create'
   fi
 
   if ! command_exists docker; then
-    printf '  - Docker is optional unless using bundled local OpenSearch. For production, external OpenSearch can be configured later.\n'
+    maybe_print_next_step 'Docker is optional unless using bundled local OpenSearch. For production, external OpenSearch can be configured later.'
   fi
 
   if ! command_exists "${MYSQL_BIN}"; then
-    printf '  - MySQL is external to this installer; install/provide mysql client before running DB commands.\n'
+    maybe_print_next_step 'MySQL is external to this installer; install/provide mysql client before running DB commands.'
   fi
 
   if [[ -z "${MYSQL_PASSWORD}" ]]; then
-    printf '  - Set MYSQL_PASSWORD before db:install creates/updates the runtime MySQL user.\n'
+    maybe_print_next_step 'Set MYSQL_PASSWORD before db:install creates/updates the runtime MySQL user.'
   fi
 
   if command_exists systemctl; then
     if ! systemctl list-unit-files "$(worker_template_unit)" >/dev/null 2>&1 \
       || ! systemctl list-unit-files "$(reaper_template_unit)" >/dev/null 2>&1; then
-      printf '  - Install services after config/venv: ./feed_opensearch_ctl.sh install-systemd\n'
+      maybe_print_next_step 'Install services after config/venv: ./feed_opensearch_ctl.sh install-systemd'
+    elif [[ "${DOCTOR_SERVICE_INSTANCES_OK:-0}" != "1" ]]; then
+      maybe_print_next_step 'One or more service instances are not active: ./feed_opensearch_ctl.sh services:status && ./feed_opensearch_ctl.sh services:logs'
     fi
+  fi
+
+  if [[ "${DOCTOR_SOURCE_MYSQL_OK:-0}" != "1" ]]; then
+    maybe_print_next_step 'Grant/check source DB reads for the worker: ./feed_opensearch_ctl.sh source:status'
+  fi
+
+  if [[ "${printed}" -eq 0 ]]; then
+    printf '\nInstall checks look complete. No recommended next steps.\n'
   fi
 }
 
@@ -1768,6 +2076,9 @@ main() {
       ;;
     db:status)
       db_status
+      ;;
+    source:status)
+      source_status
       ;;
     show-db-sql)
       show_db_sql
@@ -1856,7 +2167,7 @@ main() {
       ;;
     worker:run)
       ensure_log_dir
-      "${PYTHON_BIN}" -m app.daemon
+      "${PYTHON_BIN}" -m app.worker
       ;;
     reaper:run)
       ensure_log_dir
@@ -1882,6 +2193,10 @@ main() {
       require_systemctl
       for_worker_instances journal_unit_action
       ;;
+    worker:logs:follow)
+      require_systemctl
+      for_worker_instances journal_unit_follow_action
+      ;;
     reaper:start)
       require_systemctl
       for_reaper_instances systemctl_start_unit
@@ -1901,6 +2216,10 @@ main() {
     reaper:logs)
       require_systemctl
       for_reaper_instances journal_unit_action
+      ;;
+    reaper:logs:follow)
+      require_systemctl
+      for_reaper_instances journal_unit_follow_action
       ;;
     services:start)
       require_systemctl
@@ -1926,6 +2245,10 @@ main() {
       require_systemctl
       for_worker_instances journal_unit_action
       for_reaper_instances journal_unit_action
+      ;;
+    services:logs:follow)
+      require_systemctl
+      journal_services_follow
       ;;
     *)
       log_error "Unknown command: ${command}"

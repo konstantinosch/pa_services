@@ -51,3 +51,32 @@ CREATE TABLE IF NOT EXISTS search_index_jobs (
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS search_index_state (
+    entity_type          VARCHAR(64) NOT NULL,
+    entity_id            VARCHAR(128) NOT NULL,
+    index_status         VARCHAR(16) NOT NULL,
+    last_action          CHAR(1) NOT NULL,
+    last_job_id          BIGINT UNSIGNED NOT NULL,
+    last_job_created_at  TIMESTAMP NULL,
+    indexed_at           TIMESTAMP NULL,
+    deleted_at           TIMESTAMP NULL,
+    failed_at            TIMESTAMP NULL,
+    last_error_text      TEXT,
+    created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         ON UPDATE CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (entity_type, entity_id),
+
+    INDEX idx_state_status_updated (
+        index_status,
+        updated_at
+    ),
+
+    INDEX idx_state_last_job (
+        last_job_id
+    )
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;

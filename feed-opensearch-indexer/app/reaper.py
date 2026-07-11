@@ -17,6 +17,7 @@ from db.factory import create_adapter
 
 
 shutdown_event = threading.Event()
+shutdown_signal_received = False
 
 
 def setup_logging():
@@ -33,7 +34,8 @@ def setup_logging():
 
 
 def handle_shutdown(signum, frame):
-    logging.info("Shutdown requested")
+    global shutdown_signal_received
+    shutdown_signal_received = True
     shutdown_event.set()
 
 
@@ -88,6 +90,9 @@ def main():
             break
 
         shutdown_event.wait(REAPER_POLL_INTERVAL_SECONDS)
+
+    if shutdown_signal_received:
+        logging.info("Shutdown requested")
 
     logging.info("Reaper stopped cleanly")
 

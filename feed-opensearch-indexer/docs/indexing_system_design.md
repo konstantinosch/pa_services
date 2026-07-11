@@ -2,7 +2,7 @@
 
 ## Overview
 This document describes the architecture, design decisions, concurrency issues, and final solutions for the MySQL-based indexing job system consisting of:
-- Daemon workers
+- Worker processes
 - Reaper recovery process
 
 ---
@@ -13,7 +13,7 @@ This document describes the architecture, design decisions, concurrency issues, 
 DB → search_index_jobs → Workers → OpenSearch
 
 ### Components
-- **Daemon**: Fetches, claims, processes, finalizes jobs
+- **Worker**: Fetches, claims, processes, finalizes jobs
 - **Reaper**: Detects and releases stale jobs
 
 ---
@@ -60,7 +60,7 @@ Status != ownership
 
 ---
 
-## Worker (Daemon)
+## Worker
 
 ### Fetch Logic
 
@@ -167,7 +167,7 @@ Still useful for:
 
 ## Concurrency Model
 
-Daemon:
+Worker:
 - claims P or orphan R
 - sets claim_id
 

@@ -50,7 +50,7 @@ sudo mysql
 6
 ##indexer in Linux:
 ##OS account
-##runs the daemon process
+##runs the worker process
 ##owns files/logs/services
 
 ##indexer in MySQL:

@@ -174,13 +174,31 @@ Clearer and easier to test, but every write path must remember to enqueue.
 
 Current preference: start with app-server enqueueing.
 
+The app only needs to insert rows into `search_index_jobs`.
+
+For campaign actions:
+
+```text
+entity_type = campaign_action
+entity_id   = campaign_actions.`index`, not campaigns.`index`
+action      = producer intent: I, U, or D
+priority    = optional ordering hint; default 0
+source      = short diagnostic label; example app, admin, repair
+```
+
+The app MySQL user needs `INSERT` on:
+
+```text
+pa_opensearch_indexer.search_index_jobs
+```
+
 Example:
 
 ```sql
 START TRANSACTION;
 
 UPDATE campaign_actions
-SET feed_visible = 1
+SET status = 'closed'
 WHERE `index` = ?;
 
 INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
@@ -191,6 +209,8 @@ COMMIT;
 
 A later reconciliation/backfill command can find missing or stale indexed
 entities by comparing source tables with `search_index_state`.
+
+See `examples/php/feed_opensearch_enqueue.php` for a minimal PDO helper.
 
 ## What Happens To Old Jobs?
 

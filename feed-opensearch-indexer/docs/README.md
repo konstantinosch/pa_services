@@ -1,6 +1,6 @@
 # Indexer Service
 
-This project is a prototype indexing service.
+This project is an alpha indexing service.
 
 Its purpose is to keep an external search index, currently intended to be
 OpenSearch, in sync with source-of-truth relational data.
@@ -17,6 +17,28 @@ The project combines the job queue / worker coordination layer with the first
 real indexing path for `campaign_action` documents. Workers read change jobs,
 rebuild the current document from the source MySQL database, and upsert/delete
 documents in OpenSearch.
+
+## Alpha Status
+
+This is no longer just an experiment folder. It is an alpha deliverable with the
+main operational spine in place:
+
+```text
+installable service and config flow
+local Docker OpenSearch setup
+initial OpenSearch loader
+systemd worker/reaper instances
+MySQL queue and state schema
+durable search_index_state ledger
+worker retry and failed-state handling
+state-checkpointed D/S/F queue cleanup
+PHP enqueue helper for the app server
+operator checks for DB/source/OpenSearch access
+```
+
+It is still alpha because the documentation needs a full professional pass,
+repair/requeue commands are not built yet, automated tests are still thin, and
+the CentOS/Ubuntu clean install cycles should be repeated before handoff.
 
 ## Installation
 
@@ -269,11 +291,10 @@ Near-term repo cleanup:
 1. Separate indexer-owned SQL from demo SQL.
 2. Move demo `items` schema/data into `sql/demo/`.
 3. Keep indexer schema in `sql/indexer/schema_mysql.sql`.
-4. Add dead-letter thresholds for exhausted retries/reaps.
-5. Add a top-level README or keep this file as the main README.
-6. Move huge chat transcripts into `docs/notes/` or archive them.
-7. Remove or clearly label personal VM/dev setup notes.
-8. Add tests for job collapse and status/state transitions.
+4. Promote this document into the polished top-level README.
+5. Move huge chat transcripts into `docs/notes/` or archive them.
+6. Remove or clearly label personal VM/dev setup notes.
+7. Add tests for job collapse and status/state transitions.
 ```
 
 Possible target structure:
@@ -320,25 +341,60 @@ docs/
 
 ## Product TODO
 
-Core functionality:
+Near-term product work:
 
 ```text
-1. Only delete terminal job rows after state is checkpointed.
-2. Decide how permanent failures become F.
-3. Generalize document builders beyond `campaign_action`.
-5. Add reconciliation/backfill command:
+1. Add failed-state operator commands:
+   - db:failed:list
+   - db:failed:requeue
+   - db:failed:cleanup, if we later want explicit state cleanup
+2. Add reconciliation/backfill command:
    - find missing state rows
    - find stale indexed rows
    - enqueue repair jobs
+3. Generalize document builders beyond `campaign_action`, if new entity types
+   become part of the deliverable.
+4. Add clearer worker/reaper batch summary logs:
+   - indexed
+   - deleted
+   - failed/released
+   - terminal-cleaned
 ```
 
 Operational tooling:
 
 ```text
-1. Harden `feed_opensearch_ctl.sh doctor` for production handoff.
-2. Add deeper config validation.
-3. Add DB/schema drift validation.
-4. Add reconciliation/backfill checks against `search_index_state`.
+1. Repeat clean install/uninstall cycles on Ubuntu and CentOS.
+2. Harden `feed_opensearch_ctl.sh doctor` for production handoff.
+3. Add deeper config validation.
+4. Add DB/schema drift validation.
+5. Add OpenSearch/document count monitoring examples.
+6. Add recovery/repair runbooks:
+   - server reboot
+   - Docker/OpenSearch restart
+   - MySQL outage
+   - source DB permission failure
+```
+
+Documentation pass:
+
+```text
+1. Rewrite the README for delivery:
+   - purpose
+   - architecture
+   - install order
+   - configuration
+   - operation
+   - troubleshooting
+2. Document action vs index_status semantics:
+   - last_action = producer intent: I/U/D
+   - index_status = indexer outcome: indexed/deleted/failed
+   - U + deleted is valid when feed_visible becomes false
+   - D + deleted is valid for explicit source deletion
+3. Document required MySQL grants:
+   - pa_indexer reads source tables
+   - app user inserts search_index_jobs
+4. Document PHP enqueue integration and transaction expectations.
 ```
 
 Installable service target:

@@ -2,6 +2,8 @@ import logging
 import signal
 import threading
 
+import mysql.connector
+
 from app.config import (
     LOG_LEVEL,
     LOG_FILE,
@@ -45,7 +47,16 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    db = create_adapter()
+    try:
+        db = create_adapter()
+    except mysql.connector.Error as error:
+        logging.error(
+            "Cannot connect to indexer MySQL database. Check MYSQL_HOST, MYSQL_PORT, "
+            "MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, and that MySQL is running. error=%s",
+            error,
+        )
+        return 1
+
     db.log_config()
 
     logging.info(
@@ -95,7 +106,8 @@ def main():
         logging.info("Shutdown requested")
 
     logging.info("Reaper stopped cleanly")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

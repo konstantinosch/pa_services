@@ -90,75 +90,73 @@ Usage:
   ./feed_opensearch_ctl.sh <command>
 
 Install / Configure:
-  doctor                Check OS, commands, config, venv, Docker, and systemd units
-  install-deps          Install base OS dependencies on Ubuntu/Debian or CentOS/RHEL
-  setup-venv            Create/update Python venv and install requirements.txt
-  init-config           Create config.env from config.example.env if missing
-  configure             Interactively write config.env
-  db:install            Interactively create/reset MySQL database, user, grants, and schema
-  db:uninstall          Interactively drop MySQL schema, database, and/or user
-  db:drop               Non-interactively drop MySQL database and runtime user
-  db:schema             Interactively create/reset only indexer schema relations
-  db:status             Check app MySQL login and indexer schema visibility
-  source:status         Check worker source MySQL read access for campaign actions
-  show-db-sql           Print admin SQL for database, user, and grants
-  install-service-user  Create the dedicated Linux service user/group
-  fix-permissions       Apply service-user ownership and private config permissions
-  install-systemd       Install and enable worker/reaper systemd services
-  uninstall             Non-interactively remove managed install state
-  uninstall-interactive Interactively uninstall selected managed pieces
-  uninstall-systemd     Disable and remove worker/reaper systemd services
-  show-systemd          Print generated systemd service files
-  install-logrotate     Install logrotate rule for LOG_FILE directory
-  uninstall-logrotate   Remove managed logrotate rule
-  show-logrotate        Print active or generated logrotate rule
+  doctor                       Check OS, commands, config, venv, Docker, and systemd units
+  install-deps                 Install base OS dependencies on Ubuntu/Debian or CentOS/RHEL
+  setup-venv                   Create/update Python venv and install requirements.txt
+  init-config                  Create config.env from config.example.env if missing
+  configure                    Interactively write config.env
+  db:install                   Interactively create/reset MySQL database, user, grants, and schema
+  db:uninstall                 Interactively drop MySQL schema, database, and/or user
+  db:drop                      Non-interactively drop MySQL database and runtime user
+  db:schema                    Interactively create/reset only indexer schema relations
+  db:status                    Check app MySQL login and indexer schema visibility
+  source:status                Check worker source MySQL read access for campaign actions
+  show-db-sql                  Print admin SQL for database, user, and grants
+  install-service-user         Create the dedicated Linux service user/group
+  fix-permissions              Apply service-user ownership and private config permissions
+  install-systemd              Install and enable worker/reaper systemd services
+  uninstall                    Non-interactively remove managed install state
+  uninstall-interactive        Interactively uninstall selected managed pieces
+  uninstall-systemd            Disable and remove worker/reaper systemd services
+  show-systemd                 Print generated systemd service files
+  install-logrotate            Install logrotate rule for LOG_FILE directory
+  uninstall-logrotate          Remove managed logrotate rule
+  show-logrotate               Print active or generated logrotate rule
 
 OpenSearch:
-  opensearch:install    Start bundled local OpenSearch and wait for health
-  opensearch:uninstall  Interactively stop/remove bundled local OpenSearch
-  opensearch:start      Start the local OpenSearch Docker container
-  opensearch:stop       Stop the local OpenSearch Docker container
-  opensearch:restart    Restart the local OpenSearch Docker container
-  opensearch:status     Show OpenSearch container status
-  opensearch:logs       Follow OpenSearch logs
-  opensearch:health     Check OpenSearch HTTP and cluster health
-  opensearch:index:create
-                        Create OPENSEARCH_INDEX if missing
-  opensearch:index:reset
-                        Delete and recreate OPENSEARCH_INDEX
-  opensearch:index:delete
-                        Delete OPENSEARCH_INDEX
-  opensearch:index:show Show OPENSEARCH_INDEX mapping/settings
-  opensearch:load:dry-run
-                        Read source DB pages without writing OpenSearch
-  opensearch:load       Create index if missing, then bulk upsert source DB rows
-  opensearch:rebuild    Delete/recreate index, then bulk upsert source DB rows
+  opensearch:install           Start bundled local OpenSearch and wait for health
+  opensearch:uninstall         Interactively stop/remove bundled local OpenSearch
+  opensearch:start             Start the local OpenSearch Docker container
+  opensearch:stop              Stop the local OpenSearch Docker container
+  opensearch:restart           Restart the local OpenSearch Docker container
+  opensearch:status            Show OpenSearch container status
+  opensearch:logs              Follow OpenSearch logs
+  opensearch:health            Check OpenSearch HTTP and cluster health
+  opensearch:index:create      Create OPENSEARCH_INDEX if missing
+  opensearch:index:reset       Delete and recreate OPENSEARCH_INDEX
+  opensearch:index:delete      Delete OPENSEARCH_INDEX
+  opensearch:index:show        Show OPENSEARCH_INDEX mapping/settings
+  opensearch:load:dry-run      Read source DB pages without writing OpenSearch
+  opensearch:load              Create index if missing, then bulk upsert source DB rows
+  opensearch:rebuild           Delete/recreate index, then bulk upsert source DB rows
 
 Indexer:
-  worker:run            Run the indexing worker in the foreground
-  reaper:run            Run stale job ownership recovery in the foreground
-  worker:start          Start worker systemd service
-  worker:stop           Stop worker systemd service
-  worker:restart        Restart worker systemd service
-  worker:status         Show configured worker systemd instance status
-  worker:logs           Show worker systemd journal logs
-  worker:logs:follow    Follow worker systemd journal logs
-  reaper:start          Start reaper systemd service
-  reaper:stop           Stop reaper systemd service
-  reaper:restart        Restart reaper systemd service
-  reaper:status         Show configured reaper systemd instance status
-  reaper:logs           Show reaper systemd journal logs
-  reaper:logs:follow    Follow reaper systemd journal logs
-  services:start        Start worker and reaper services
-  services:stop         Stop worker and reaper services
-  services:restart      Restart worker and reaper services
-  services:status       Show worker and reaper service status
-  services:logs         Show worker and reaper systemd journal logs
-  services:logs:follow  Follow worker and reaper systemd journal logs
+  worker:run                   Run the indexing worker in the foreground
+  worker:check                 Check worker file, DB, source DB, and OpenSearch access
+  reaper:run                   Run stale job ownership recovery in the foreground
+  reaper:check                 Check reaper file and DB access
+  worker:start                 Start worker systemd service
+  worker:stop                  Stop worker systemd service
+  worker:restart               Restart worker systemd service
+  worker:status                Show configured worker systemd instance status
+  worker:logs                  Show worker systemd journal logs
+  worker:logs:follow           Follow worker systemd journal logs
+  reaper:start                 Start reaper systemd service
+  reaper:stop                  Stop reaper systemd service
+  reaper:restart               Restart reaper systemd service
+  reaper:status                Show configured reaper systemd instance status
+  reaper:logs                  Show reaper systemd journal logs
+  reaper:logs:follow           Follow reaper systemd journal logs
+  services:start               Start worker and reaper services
+  services:stop                Stop worker and reaper services
+  services:restart             Restart worker and reaper services
+  services:status              Show worker and reaper service status
+  services:logs                Show worker and reaper systemd journal logs
+  services:logs:follow         Follow worker and reaper systemd journal logs
 
 Project:
-  config                Print resolved project paths and command settings
-  help                  Show this help
+  config                       Print resolved project paths and command settings
+  help                         Show this help
 
 Configuration:
   ./feed_opensearch_ctl.sh init-config
@@ -699,7 +697,7 @@ systemd_template_content() {
   cat <<EOF
 [Unit]
 Description=${description} %i
-After=network-online.target
+After=network-online.target mysql.service mysqld.service mariadb.service
 Wants=network-online.target
 
 [Service]
@@ -1639,6 +1637,300 @@ source_status() {
   fi
 }
 
+run_as_service_user() {
+  if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    return 127
+  fi
+
+  if [[ "$(id -un)" == "${SERVICE_USER}" ]]; then
+    "$@"
+    return
+  fi
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    if command_exists runuser; then
+      runuser -u "${SERVICE_USER}" -- "$@"
+    elif command_exists sudo; then
+      sudo -u "${SERVICE_USER}" "$@"
+    else
+      return 127
+    fi
+    return
+  fi
+
+  if command_exists sudo; then
+    sudo -n -u "${SERVICE_USER}" "$@"
+    return
+  fi
+
+  return 127
+}
+
+service_user_check() {
+  local description="$1"
+  shift
+
+  if output="$(run_as_service_user "$@" 2>&1)"; then
+    printf 'ok   %s\n' "${description}"
+    return 0
+  fi
+
+  printf 'fail %s: %s\n' "${description}" "${output:-unable to run as ${SERVICE_USER}}"
+  return 1
+}
+
+service_user_in_group() {
+  local group_name="$1"
+  id -nG "${SERVICE_USER}" | tr ' ' '\n' | grep -qx "${group_name}"
+}
+
+service_user_has_single_permission() {
+  local path="$1"
+  local permission="$2"
+  local mode owner group owner_digit group_digit other_digit bit
+
+  [[ -e "${path}" ]] || return 1
+
+  case "${permission}" in
+    r) bit=4 ;;
+    w) bit=2 ;;
+    x) bit=1 ;;
+    *)
+      log_error "Unknown permission check: ${permission}"
+      return 1
+      ;;
+  esac
+
+  mode="$(stat -Lc '%a' "${path}")"
+  owner="$(stat -Lc '%U' "${path}")"
+  group="$(stat -Lc '%G' "${path}")"
+  mode="${mode: -3}"
+  owner_digit="${mode:0:1}"
+  group_digit="${mode:1:1}"
+  other_digit="${mode:2:1}"
+
+  if [[ "${owner}" == "${SERVICE_USER}" ]] && (( owner_digit & bit )); then
+    return 0
+  fi
+
+  if service_user_in_group "${group}" && (( group_digit & bit )); then
+    return 0
+  fi
+
+  if (( other_digit & bit )); then
+    return 0
+  fi
+
+  return 1
+}
+
+service_user_can_reach_path() {
+  local path="$1"
+  local dir
+
+  dir="$(dirname "${path}")"
+
+  while [[ "${dir}" != "/" && "${dir}" != "." ]]; do
+    service_user_has_single_permission "${dir}" x || return 1
+    dir="$(dirname "${dir}")"
+  done
+
+  return 0
+}
+
+service_user_path_check() {
+  local description="$1"
+  local path="$2"
+  local permission="$3"
+
+  if service_user_can_reach_path "${path}" && service_user_has_single_permission "${path}" "${permission}"; then
+    printf 'ok   %s\n' "${description}"
+    return 0
+  fi
+
+  printf 'fail %s: %s lacks %s access to %s\n' "${description}" "${SERVICE_USER}" "${permission}" "${path}"
+  return 1
+}
+
+service_user_import_check() {
+  local module_name="$1"
+  local output
+
+  if output="$(run_as_service_user "${PYTHON_BIN}" -c "import ${module_name}" 2>&1)"; then
+    printf 'ok   service user can import %s\n' "${module_name}"
+    return 0
+  fi
+
+  if [[ "${output}" == *"sudo: a password is required"* \
+        || "${output}" == *"no new privileges"* \
+        || "${output}" == *"unable to run as"* \
+        || "${output}" == "" ]]; then
+    if output="$("${PYTHON_BIN}" -c "import ${module_name}" 2>&1)"; then
+      printf 'ok   Python can import %s\n' "${module_name}"
+      printf 'info service-user import execution skipped; no passwordless sudo/runuser from this shell\n'
+      return 0
+    fi
+  fi
+
+  printf 'fail service user can import %s: %s\n' "${module_name}" "${output}"
+  return 1
+}
+
+runtime_access_check() {
+  local module_name="$1"
+  local failed=0
+
+  printf 'Runtime file/access preflight\n'
+  printf 'service_user=%s\n' "${SERVICE_USER}"
+  printf 'service_group=%s\n' "${SERVICE_GROUP}"
+  printf 'service_dir=%s\n' "${SERVICE_DIR}"
+  printf 'config_file=%s\n' "${CONFIG_FILE}"
+  printf 'log_dir=%s\n' "$(service_log_dir)"
+  printf 'python_bin=%s\n' "${PYTHON_BIN}"
+
+  if ! getent passwd "${SERVICE_USER}" >/dev/null 2>&1; then
+    printf 'fail service user exists: %s\n' "${SERVICE_USER}"
+    printf 'hint run: ./feed_opensearch_ctl.sh install-service-user\n'
+    return 1
+  fi
+  printf 'ok   service user exists\n'
+
+  service_user_path_check "service user can traverse parent directory" "$(dirname "${SERVICE_DIR}")" x || failed=1
+  service_user_path_check "service user can traverse service directory" "${SERVICE_DIR}" x || failed=1
+  service_user_path_check "service user can read control script" "${SERVICE_DIR}/feed_opensearch_ctl.sh" r || failed=1
+  service_user_path_check "service user can read config" "${CONFIG_FILE}" r || failed=1
+  service_user_path_check "service user can write logs" "$(service_log_dir)" w || failed=1
+  service_user_path_check "service user can execute Python" "${PYTHON_BIN}" x || failed=1
+  service_user_import_check "${module_name}" || failed=1
+
+  if [[ "${failed}" -ne 0 ]]; then
+    printf 'hint run: ./feed_opensearch_ctl.sh fix-permissions\n'
+    return 1
+  fi
+}
+
+indexer_db_worker_rights_check() {
+  local output
+  local sql
+
+  sql="
+START TRANSACTION;
+SELECT COUNT(*) FROM search_index_jobs;
+UPDATE search_index_jobs SET worker_id = worker_id WHERE 1 = 0;
+INSERT INTO search_index_state
+  (entity_type, entity_id, index_status, last_action, last_job_id, last_job_created_at, indexed_at)
+VALUES
+  ('__preflight__', '__worker__', 'checked', 'U', 0, NOW(), NOW())
+ON DUPLICATE KEY UPDATE updated_at = updated_at;
+DELETE FROM search_index_state
+WHERE entity_type = '__preflight__' AND entity_id = '__worker__';
+ROLLBACK;
+"
+
+  printf 'Indexer MySQL worker-rights preflight\n'
+  printf 'host=%s\n' "${MYSQL_HOST}"
+  printf 'port=%s\n' "${MYSQL_PORT}"
+  printf 'user=%s\n' "${MYSQL_USER}"
+  printf 'database=%s\n' "${MYSQL_DATABASE}"
+
+  if output="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "${sql}" 2>&1)"; then
+    printf 'ok   worker can SELECT/UPDATE queue and INSERT/DELETE state rows\n'
+    return 0
+  fi
+
+  printf 'fail worker indexer DB rights: %s\n' "${output}"
+  return 1
+}
+
+indexer_db_reaper_rights_check() {
+  local output
+  local sql
+
+  sql="
+START TRANSACTION;
+SELECT COUNT(*) FROM search_index_jobs;
+UPDATE search_index_jobs SET claim_id = claim_id WHERE 1 = 0;
+ROLLBACK;
+"
+
+  printf 'Indexer MySQL reaper-rights preflight\n'
+  printf 'host=%s\n' "${MYSQL_HOST}"
+  printf 'port=%s\n' "${MYSQL_PORT}"
+  printf 'user=%s\n' "${MYSQL_USER}"
+  printf 'database=%s\n' "${MYSQL_DATABASE}"
+
+  if output="$(mysql_app "${MYSQL_DATABASE}" -N -B -e "${sql}" 2>&1)"; then
+    printf 'ok   reaper can SELECT/UPDATE queue rows\n'
+    return 0
+  fi
+
+  printf 'fail reaper indexer DB rights: %s\n' "${output}"
+  return 1
+}
+
+worker_opensearch_check() {
+  local root_code
+  local index_code
+
+  printf 'OpenSearch worker preflight\n'
+  printf 'url=%s\n' "${OPENSEARCH_URL}"
+  printf 'index=%s\n' "${OPENSEARCH_INDEX}"
+
+  root_code="$(opensearch_status_code GET "/")"
+  if [[ "${root_code}" == "200" ]]; then
+    printf 'ok   OpenSearch endpoint reachable\n'
+  else
+    printf 'fail OpenSearch endpoint reachable: http_status=%s\n' "${root_code}"
+    return 1
+  fi
+
+  index_code="$(opensearch_status_code HEAD "/${OPENSEARCH_INDEX}")"
+  if [[ "${index_code}" == "200" ]]; then
+    printf 'ok   OpenSearch index exists\n'
+    return 0
+  fi
+
+  printf 'fail OpenSearch index exists: http_status=%s\n' "${index_code}"
+  printf 'hint run: ./feed_opensearch_ctl.sh opensearch:index:create\n'
+  return 1
+}
+
+worker_check() {
+  local failed=0
+
+  printf 'Feed OpenSearch worker preflight\n'
+  runtime_access_check app.worker || failed=1
+  printf '\n'
+  indexer_db_worker_rights_check || failed=1
+  printf '\n'
+  source_status || failed=1
+  printf '\n'
+  worker_opensearch_check || failed=1
+
+  if [[ "${failed}" -ne 0 ]]; then
+    printf '\nWorker preflight failed.\n'
+    return 1
+  fi
+
+  printf '\nWorker preflight passed.\n'
+}
+
+reaper_check() {
+  local failed=0
+
+  printf 'Feed OpenSearch reaper preflight\n'
+  runtime_access_check app.reaper || failed=1
+  printf '\n'
+  indexer_db_reaper_rights_check || failed=1
+
+  if [[ "${failed}" -ne 0 ]]; then
+    printf '\nReaper preflight failed.\n'
+    return 1
+  fi
+
+  printf '\nReaper preflight passed.\n'
+}
+
 print_config() {
   cat <<EOF
 service_dir=${SERVICE_DIR}
@@ -2169,9 +2461,15 @@ main() {
       ensure_log_dir
       "${PYTHON_BIN}" -m app.worker
       ;;
+    worker:check)
+      worker_check
+      ;;
     reaper:run)
       ensure_log_dir
       "${PYTHON_BIN}" -m app.reaper
+      ;;
+    reaper:check)
+      reaper_check
       ;;
     worker:start)
       require_systemctl

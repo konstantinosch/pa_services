@@ -44,6 +44,8 @@ newgrp pa_indexer
 ./feed_opensearch_ctl.sh install-systemd
 ./feed_opensearch_ctl.sh install-logrotate
 ./feed_opensearch_ctl.sh fix-permissions
+./feed_opensearch_ctl.sh worker:check
+./feed_opensearch_ctl.sh reaper:check
 ```
 
 `install-deps` installs common base packages for the service runtime, but it
@@ -119,6 +121,8 @@ newgrp pa_indexer
 ./feed_opensearch_ctl.sh install-systemd
 ./feed_opensearch_ctl.sh install-logrotate
 ./feed_opensearch_ctl.sh fix-permissions
+./feed_opensearch_ctl.sh worker:check
+./feed_opensearch_ctl.sh reaper:check
 ./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
 ```
@@ -288,6 +292,8 @@ Start and inspect services:
 
 ```bash
 ./feed_opensearch_ctl.sh fix-permissions
+./feed_opensearch_ctl.sh worker:check
+./feed_opensearch_ctl.sh reaper:check
 ./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
 ./feed_opensearch_ctl.sh services:logs

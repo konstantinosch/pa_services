@@ -17,6 +17,8 @@ import logging
 import signal
 import threading
 
+import mysql.connector
+
 from app.campaign_actions import ENTITY_TYPE as CAMPAIGN_ACTION
 from app.config import (
     WORKER_BATCH_DELAY_SECONDS,
@@ -119,9 +121,29 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    db = create_adapter()
+    try:
+        db = create_adapter()
+    except mysql.connector.Error as error:
+        logging.error(
+            "Cannot connect to indexer MySQL database. Check MYSQL_HOST, MYSQL_PORT, "
+            "MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE, and that MySQL is running. error=%s",
+            error,
+        )
+        return 1
+
     db.log_config()
-    source_db = SourceMySql(SOURCE_MYSQL_CONFIG)
+
+    try:
+        source_db = SourceMySql(SOURCE_MYSQL_CONFIG)
+    except mysql.connector.Error as error:
+        logging.error(
+            "Cannot connect to source MySQL database. Check SOURCE_MYSQL_HOST, "
+            "SOURCE_MYSQL_PORT, SOURCE_MYSQL_USER/SOURCE_MYSQL_PASSWORD or MYSQL_USER/MYSQL_PASSWORD, "
+            "SOURCE_MYSQL_DATABASE, grants, and that MySQL is running. error=%s",
+            error,
+        )
+        return 1
+
     search_index = OpenSearchIndexer(OPENSEARCH_CONFIG)
     logging.info(
         "Indexer targets: source_db=%s opensearch=%s index=%s",
@@ -190,7 +212,8 @@ def main():
         logging.info("Shutdown requested")
 
     logging.info("Worker stopped cleanly")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

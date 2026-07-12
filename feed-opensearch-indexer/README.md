@@ -26,17 +26,58 @@ The service therefore combines three pieces:
 ## Architecture at a glance
 
 ```text
-source DB -> search_index_jobs -> worker -> OpenSearch
-                       |
-                       -> search_index_state
+                         +----------------------+
+                         | Application / Admin  |
+                         | source-row changes   |
+                         +----------+-----------+
+                                    |
+                                    | enqueue I/U/D job
+                                    v
++----------------------+     +------+---------------------------------------+
+| Source MySQL DB      |     | Indexer MySQL DB                             |
+| deedspot, etc.       |     | pa_opensearch_indexer                        |
+|                      |     |                                              |
+| campaign_actions     |<----+ search_index_jobs       search_index_state   |
+| feed_visible logic   |read | queue/work table        per-entity ledger    |
++----------+-----------+     +------+---------------------------+-----------+
+           ^                        |                           ^
+           |                        | claim/retry/cleanup       | checkpoint
+           |                        v                           |
+           |                 +------+-------+                   |
+           +-----------------| Worker(s)    +-------------------+
+              rebuild latest | upsert/delete|
+              document       +------+-------+
+                                    |
+                                    v
+                         +----------+-----------+
+                         | OpenSearch           |
+                         | campaign_actions_feed|
+                         +----------------------+
+
+        +------------------+        +-------------------------------+
+        | Initial loader   |------->| OpenSearch bulk upsert path   |
+        | source DB scan   |        | used for first load/rebuild   |
+        +------------------+        +-------------------------------+
+
+        +------------------+
+        | Reaper(s)        |
+        | release stale    |
+        | worker claims    |
+        +--------+---------+
+                 |
+                 v
+        search_index_jobs claim_id / worker_id cleanup
 ```
 
 ### Main components
 
-- Worker: claims pending jobs, rebuilds the current document from MySQL, and writes to OpenSearch.
-- Reaper: releases stale running jobs when ownership appears abandoned.
-- Loader: performs initial bulk indexing from the source database.
-- Control script: provides the install/configure/manage entrypoint for the whole service.
+- Application/Admin code: writes source changes and enqueues lightweight `I`, `U`, or `D` jobs.
+- Source MySQL DB: the application database and source of truth for campaign actions.
+- Indexer MySQL DB: owns `search_index_jobs` and `search_index_state`.
+- Worker: claims queue jobs, rebuilds the current document from MySQL, and writes to OpenSearch.
+- Reaper: releases stale worker ownership when a worker goes away or loses its claim.
+- Loader: performs initial bulk indexing or full rebuilds from the source database.
+- Control script: provides the install, configure, health-check, and management entrypoint.
 
 ---
 

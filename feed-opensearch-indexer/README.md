@@ -33,13 +33,13 @@ The service therefore combines three pieces:
                                     |
                                     | enqueue I/U/D job
                                     v
-+----------------------+     +------+---------------------------------------+
-| Source MySQL DB      |     | Indexer MySQL DB                             |
-| deedspot, etc.       |     | pa_opensearch_indexer                        |
-|                      |     |                                              |
-| campaign_actions     |<----+ search_index_jobs       search_index_state   |
-| feed_visible logic   |read | queue/work table        per-entity ledger    |
-+----------+-----------+     +------+---------------------------+-----------+
++----------------------+     +------+---------------------------------------+        +--------------------+
+| Source MySQL DB      |     | Indexer MySQL DB                             |        | Reaper(s)          |
+| deedspot, etc.       |     | pa_opensearch_indexer                        |        | stale claim scan   |
+|                      |     |                                              |        | ownership cleanup |
+| campaign_actions     |<----+ search_index_jobs       search_index_state   |<-------+ clears claim_id   |
+| feed_visible logic   |read | queue/work table        per-entity ledger    |        | and worker_id      |
++----------+-----------+     +------+---------------------------+-----------+        +--------------------+
            ^                        |                           ^
            |                        | claim/retry/cleanup       | checkpoint
            |                        v                           |
@@ -59,14 +59,6 @@ The service therefore combines three pieces:
         | source DB scan   |        | used for first load/rebuild   |
         +------------------+        +-------------------------------+
 
-        +------------------+
-        | Reaper(s)        |
-        | release stale    |
-        | worker claims    |
-        +--------+---------+
-                 |
-                 v
-        search_index_jobs claim_id / worker_id cleanup
 ```
 
 ### Main components
@@ -116,7 +108,7 @@ GRANT INSERT ON pa_opensearch_indexer.search_index_jobs TO 'app_user'@'app_host'
 
 ---
 
-## Installation
+## Installation phases
 
 The main entrypoint is the control script:
 
@@ -193,7 +185,7 @@ The worker and reaper should run as a dedicated Linux service account. The contr
 
 ---
 
-### Typical installation flow (example)
+### Full fresh-host install example
 
 The following is a practical end-to-end example for a fresh host. It is meant as a copy/paste-friendly reference rather than a strict requirement for every environment. It assumes you want the bundled local OpenSearch container; if you already have an external OpenSearch endpoint, skip the Docker and local-container steps and point `OPENSEARCH_URL` at that service instead.
 
@@ -208,6 +200,8 @@ cd /opt/pa_services/feed-opensearch-indexer
 
 ./feed_opensearch_ctl.sh db:install
 ./feed_opensearch_ctl.sh db:status
+
+# This should pass after SOURCE_MYSQL_* and source grants are configured.
 ./feed_opensearch_ctl.sh source:status
 ```
 
@@ -261,6 +255,14 @@ Continue the service install:
 ./feed_opensearch_ctl.sh reaper:check
 ./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
+```
+
+Successful installation should leave the worker/reaper units active, OpenSearch reachable, and the target index queryable:
+
+```bash
+./feed_opensearch_ctl.sh services:status
+./feed_opensearch_ctl.sh opensearch:health
+curl http://localhost:9200/campaign_actions_feed/_count?pretty
 ```
 
 ---
@@ -389,6 +391,12 @@ OPENSEARCH_LOADER_PAGE_SIZE=10000
 ## Application enqueue examples
 
 The application-side enqueue path is intentionally simple: write the source change, then insert a row into `search_index_jobs` with the appropriate action. The PHP helper in [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) shows the general pattern, and the examples below cover the three main cases.
+
+The application-side MySQL user needs permission to write queue jobs:
+
+```sql
+GRANT INSERT ON pa_opensearch_indexer.search_index_jobs TO 'app_user'@'app_host';
+```
 
 The examples show the two logical operations separately. They are not meant to
 force a specific transaction shape. If the source database and indexer database

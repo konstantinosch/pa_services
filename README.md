@@ -18,7 +18,7 @@ pa_services/
 │   ├── db/                    # MySQL adapter and schema helpers
 │   ├── docker/opensearch/     # local OpenSearch docker-compose setup
 │   ├── sql/                   # MySQL and OpenSearch SQL/schema assets
-│   ├── docs/                  # installation, deployment, and implementation notes
+│   ├── docs/                  # historical notes kept for reference
 │   ├── config.example.env     # example configuration for the indexer
 │   └── feed_opensearch_ctl.sh # control script for install / configure / manage
 ├── feed-ram-refresh/

@@ -89,14 +89,45 @@ That separation avoids the old churn of repeatedly flipping running jobs back to
 
 ### Queue concurrency model
 
-The worker uses a deterministic locking approach to claim jobs safely and avoid the deadlocks that came from older update-heavy patterns. The current flow is based on selecting eligible jobs, using `FOR UPDATE SKIP LOCKED` to claim them without blocking on already-locked rows, and then updating by primary key rather than rewriting the same rows through broad update joins.
+The worker uses a deterministic locking approach to claim jobs safely and avoid
+the deadlocks that came from older update-heavy patterns. The current flow is
+based on selecting eligible jobs, using `FOR UPDATE SKIP LOCKED` to claim them
+without blocking on already-locked rows, and then updating by primary key rather
+than rewriting the same rows through broad update joins.
 
-Deadlocks are handled by avoiding the problematic patterns that caused them in the first place: the code no longer relies on update joins that rewrite the same table in unpredictable ways, and it avoids status churn for running jobs. Instead, the queue uses a two-part coordination model:
+The early design used broader update patterns, including update joins against
+the same queue table. Those are risky under concurrency because MySQL can lock
+secondary-index ranges in different orders for different workers. Another
+problematic pattern was stale recovery that changed jobs from `R` back to `P`;
+that rewrote the indexed `status` column while other workers were scanning and
+locking pending rows.
+
+The current design avoids those failure modes:
+
+1. Select a small deterministic seed batch.
+2. Lock eligible rows with `FOR UPDATE SKIP LOCKED`.
+3. Expand by entity only through ordered primary-key row locks.
+4. Update claimed rows by primary key.
+5. Keep stale recovery as ownership cleanup, not `R -> P` status churn.
+
+Instead of treating status as ownership, the queue uses a two-part coordination
+model:
 
 - `status` describes the lifecycle state of the job: pending, running, done, superseded, or failed.
 - `claim_id` describes ownership for in-flight work. A running job with a claim is considered actively owned; a running job without a claim is orphaned/reclaimable.
 
 That split is what keeps multiple workers and reapers from getting tangled up. Workers only claim jobs that are pending or orphaned-running, and a reaper can recover stale ownership by clearing claim information without converting the job back to pending. This prevents workers from fighting over the same row, avoids oscillation between `R` and `P`, and keeps the system safe under concurrent processing.
+
+Practical rules for future changes:
+
+- Prefer primary-key updates after selecting/locking job IDs.
+- Avoid update joins that rewrite `search_index_jobs` while workers are also
+  claiming from it.
+- Avoid unnecessary writes to indexed coordination columns such as `status`.
+- Keep transactions short and ordered by `job_id` where possible.
+- Treat MySQL deadlocks and lock-wait timeouts as retryable database events.
+- Use `available_at` for retry backoff, scheduling, or throttling; it is not the
+  core correctness mechanism.
 
 ### Source visibility rule
 
@@ -430,6 +461,13 @@ SOURCE_MYSQL_SUDO=1
 
 If SOURCE_MYSQL_USER is empty, the worker will reuse the indexer MySQL credentials; for production, it is better to provide a dedicated read-only source user.
 
+The source user must be able to read the source tables used by the OpenSearch document SQL. For local testing with the bundled `deedspot` database, the simplest grant is:
+
+```bash
+sudo mysql -e "GRANT SELECT ON deedspot.* TO 'pa_indexer'@'localhost'; FLUSH PRIVILEGES;"
+./feed_opensearch_ctl.sh source:status
+```
+
 ### OpenSearch configuration
 
 Key settings:
@@ -510,7 +548,18 @@ OPENSEARCH_LOADER_PAGE_SIZE=10000
 ./feed_opensearch_ctl.sh services:stop
 ./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
+./feed_opensearch_ctl.sh services:logs
+./feed_opensearch_ctl.sh services:logs:follow
 ```
+
+Journal commands show the latest 100 lines by default. Override that with `JOURNAL_LINES`:
+
+```bash
+JOURNAL_LINES=300 ./feed_opensearch_ctl.sh worker:logs
+JOURNAL_LINES=50 ./feed_opensearch_ctl.sh services:logs:follow
+```
+
+For live monitoring across all configured worker and reaper instances, prefer `services:logs:follow`.
 
 ### Worker and reaper control
 
@@ -556,9 +605,89 @@ The service can remove terminal jobs that are already covered by the durable sta
 ./feed_opensearch_ctl.sh db:cleanup-jobs 50000
 ```
 
+### Uninstall and teardown
+
+The default uninstall command is non-interactive. It removes managed install state while keeping the project files in place:
+
+```bash
+./feed_opensearch_ctl.sh uninstall
+```
+
+It removes:
+
+- systemd worker/reaper units
+- the logrotate configuration
+- `OPENSEARCH_INDEX`
+- bundled OpenSearch containers and volumes
+- the indexer MySQL database and runtime user
+- the Linux service user
+- runtime logs
+
+It does not remove `/opt/pa_services` or the checked-out project files.
+
+For selective cleanup, use the interactive path:
+
+```bash
+./feed_opensearch_ctl.sh uninstall-interactive
+```
+
+The interactive OpenSearch choices are split deliberately:
+
+```text
+opensearch-index [keep] (keep remove)
+opensearch-containers [keep] (keep stop down down-volumes)
+```
+
+`remove` deletes only `OPENSEARCH_INDEX` through the OpenSearch HTTP API. `stop` stops the bundled container without deleting it. `down` removes the bundled Docker Compose container and network. `down-volumes` also removes the Docker volume, which destroys all local OpenSearch index data stored by that container.
+
+For only MySQL cleanup:
+
+```bash
+./feed_opensearch_ctl.sh db:uninstall
+```
+
+For repeat test teardown, the non-interactive drop shortcut removes the configured indexer database and MySQL runtime user immediately:
+
+```bash
+./feed_opensearch_ctl.sh db:drop
+```
+
+`db:uninstall` destructive paths require typed confirmation. `db:drop` is intentionally non-interactive and should only be used when `MYSQL_DATABASE` and `MYSQL_USER` are known test/install targets.
+
 ---
 
 ## Operational notes and useful details
+
+### Routine health checks
+
+After installation, these commands give a quick view of whether the service survived routine trouble such as reboot, power loss, Docker restart, MySQL restart, or OpenSearch restart:
+
+```bash
+./feed_opensearch_ctl.sh services:status
+./feed_opensearch_ctl.sh services:logs
+./feed_opensearch_ctl.sh db:status
+./feed_opensearch_ctl.sh source:status
+./feed_opensearch_ctl.sh opensearch:health
+curl http://localhost:9200/campaign_actions_feed/_count?pretty
+sudo mysql deedspot -e "SELECT COUNT(*) FROM campaign_actions WHERE feed_visible = 1;"
+```
+
+The intended recovery model is:
+
+- systemd restarts worker and reaper instances after reboot
+- Docker restarts the bundled OpenSearch container when configured to do so
+- the reaper releases stale running jobs after `REAPER_STALE_SECONDS`
+- released jobs wait `REAPER_RELEASE_DELAY_SECONDS` before another worker can reclaim them
+- the initial loader can rebuild OpenSearch from the source database if local index data is lost
+
+Planned operator commands:
+
+```bash
+./feed_opensearch_ctl.sh verify
+./feed_opensearch_ctl.sh queue:status
+./feed_opensearch_ctl.sh opensearch:count
+./feed_opensearch_ctl.sh opensearch:drift
+```
 
 ### Local OpenSearch with Docker
 

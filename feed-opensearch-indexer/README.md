@@ -36,8 +36,8 @@ The service therefore combines three pieces:
 +----------------------+     +------+---------------------------------------+        +--------------------+
 | Source MySQL DB      |     | Indexer MySQL DB                             |        | Reaper(s)          |
 | deedspot, etc.       |     | pa_opensearch_indexer                        |        | stale claim scan   |
-|                      |     |                                              |        | ownership cleanup |
-| campaign_actions     |<----+ search_index_jobs       search_index_state   |<-------+ clears claim_id   |
+|                      |     |                                              |        | ownership cleanup  |
+| campaign_actions     |<----+ search_index_jobs       search_index_state   |<-------+ clears claim_id    |
 | feed_visible logic   |read | queue/work table        per-entity ledger    |        | and worker_id      |
 +----------+-----------+     +------+---------------------------+-----------+        +--------------------+
            ^                        |                           ^

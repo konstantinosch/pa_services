@@ -116,42 +116,6 @@ GRANT INSERT ON pa_opensearch_indexer.search_index_jobs TO 'app_user'@'app_host'
 
 ---
 
-## Quick start
-
-From the service directory:
-
-```bash
-cd /opt/pa_services/feed-opensearch-indexer
-
-./feed_opensearch_ctl.sh doctor
-./feed_opensearch_ctl.sh install-deps
-./feed_opensearch_ctl.sh setup-venv
-./feed_opensearch_ctl.sh init-config
-./feed_opensearch_ctl.sh configure
-./feed_opensearch_ctl.sh db:install
-./feed_opensearch_ctl.sh db:status
-./feed_opensearch_ctl.sh source:status
-./feed_opensearch_ctl.sh install-service-user
-./feed_opensearch_ctl.sh install-systemd
-./feed_opensearch_ctl.sh install-logrotate
-./feed_opensearch_ctl.sh fix-permissions
-./feed_opensearch_ctl.sh worker:check
-./feed_opensearch_ctl.sh reaper:check
-```
-
-If you are using the bundled local OpenSearch container, continue with:
-
-```bash
-./feed_opensearch_ctl.sh opensearch:install
-./feed_opensearch_ctl.sh opensearch:index:create
-./feed_opensearch_ctl.sh opensearch:health
-./feed_opensearch_ctl.sh opensearch:load
-./feed_opensearch_ctl.sh services:restart
-./feed_opensearch_ctl.sh services:status
-```
-
----
-
 ## Installation
 
 The main entrypoint is the control script:

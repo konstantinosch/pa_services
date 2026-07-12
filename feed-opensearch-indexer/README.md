@@ -214,7 +214,7 @@ Run the standard install sequence:
 
 The installer uses the service directory for its runtime state and logs.
 
-### 4. Bootstrap MySQL
+### 3. Bootstrap MySQL
 
 The indexer uses a dedicated MySQL database and runtime user for queue control and state. The control script can create or inspect those pieces:
 
@@ -321,23 +321,29 @@ sudo docker run hello-world
 
 ## Application enqueue examples
 
-The application-side enqueue path is intentionally simple: write the source change first, then insert a row into `search_index_jobs` with the appropriate action. The PHP helper in [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) shows the general pattern, and the examples below cover the three main cases.
+The application-side enqueue path is intentionally simple: write the source change, then insert a row into `search_index_jobs` with the appropriate action. The PHP helper in [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) shows the general pattern, and the examples below cover the three main cases.
+
+The examples show the two logical operations separately. They are not meant to
+force a specific transaction shape. If the source database and indexer database
+are on the same MySQL server and the application user has the right grants, the
+application may choose to enqueue in the same transaction as the source write.
+If not, enqueue immediately after the source write commits and let the indexer
+remain eventually consistent.
 
 ### 1. Updated campaign action
 
 Use an update action when a campaign action changed in a way that should refresh the OpenSearch document from the current source state.
 
 ```sql
-START TRANSACTION;
-
-UPDATE campaign_actions
-SET title = 'Updated title', updated_at = NOW()
+UPDATE deedspot.campaign_actions
+SET title = 'Updated title', modified_at = UNIX_TIMESTAMP()
 WHERE `index` = ?;
+```
 
-INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+```sql
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
 VALUES ('campaign_action', ?, 'U', 0, 'app');
-
-COMMIT;
 ```
 
 See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
@@ -347,18 +353,17 @@ See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqu
 Use an update action when the action is still changing, but the current source state means it should no longer be indexed. A common example is closing the action: the worker will rebuild the document, see that the action is no longer feed-visible, and remove the document from OpenSearch.
 
 ```sql
-START TRANSACTION;
-
-UPDATE campaign_actions
+UPDATE deedspot.campaign_actions
 SET status = 'closed'
 WHERE `index` = ?;
+```
 
+```sql
 -- This is still an update job, but the indexer will remove the document
 -- from OpenSearch because the current state is no longer feed-visible.
-INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
 VALUES ('campaign_action', ?, 'U', 0, 'app');
-
-COMMIT;
 ```
 
 See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
@@ -368,15 +373,14 @@ See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqu
 Use a delete action when the source row is being removed and the corresponding OpenSearch document should also disappear.
 
 ```sql
-START TRANSACTION;
-
-DELETE FROM campaign_actions
+DELETE FROM deedspot.campaign_actions
 WHERE `index` = ?;
+```
 
-INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+```sql
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
 VALUES ('campaign_action', ?, 'D', 0, 'app');
-
-COMMIT;
 ```
 
 See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.

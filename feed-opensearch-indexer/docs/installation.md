@@ -542,7 +542,8 @@ After the initial load, application code should enqueue changed source rows in
 the indexer database:
 
 ```sql
-INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
 VALUES ('campaign_action', '12345', 'U', 0, 'app');
 ```
 

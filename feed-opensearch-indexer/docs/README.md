@@ -217,16 +217,15 @@ pa_opensearch_indexer.search_index_jobs
 Example:
 
 ```sql
-START TRANSACTION;
-
-UPDATE campaign_actions
+UPDATE deedspot.campaign_actions
 SET status = 'closed'
 WHERE `index` = ?;
+```
 
-INSERT INTO search_index_jobs (entity_type, entity_id, action, priority, source)
+```sql
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
 VALUES ('campaign_action', ?, 'U', 0, 'app');
-
-COMMIT;
 ```
 
 A later reconciliation/backfill command can find missing or stale indexed

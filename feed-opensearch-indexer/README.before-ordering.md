@@ -81,38 +81,140 @@ The service therefore combines three pieces:
 
 ---
 
-## Before you install
+## Core concepts
 
-Collect these details before running the installer on a new host:
+### Queue table: search_index_jobs
 
-| Needed detail | Why it matters | Example |
-| --- | --- | --- |
-| Source MySQL host, port, and database | The loader and worker read campaign actions from the source of truth. | `localhost:3306`, `deedspot` |
-| Source MySQL read credentials | The worker needs read access to the tables used by the document SQL. | `pa_indexer` with `SELECT` grants |
-| Indexer MySQL admin path | `db:install` creates the queue database, runtime user, grants, and schema. | `sudo mysql` |
-| OpenSearch endpoint | The worker and loader need a target index. | `http://localhost:9200` |
-| OpenSearch deployment choice | Use a managed/external cluster or the bundled local Docker container. | bundled Docker for test hosts |
-| Application enqueue user | The app needs permission to insert queue jobs. | `INSERT` on `pa_opensearch_indexer.search_index_jobs` |
-| Linux service user | systemd runs worker/reaper under this account. | `pa_indexer` |
+This is the indexer-owned work queue. Each row is a signal that something changed and the search projection should be refreshed.
 
-The service uses two different MySQL roles:
+Important fields:
 
-| Purpose | Config prefix | Typical database | Used by |
-| --- | --- | --- | --- |
-| Indexer queue/state database | `MYSQL_*` | `pa_opensearch_indexer` | control script, worker, reaper |
-| Source application database | `SOURCE_MYSQL_*` | `deedspot` | loader and worker document rebuilds |
+- entity_type / entity_id: identifies the affected source entity
+- action: I, U, or D
+- status: P, R, D, S, or F
+- claim_id / worker_id: ownership markers for in-flight work
+- retry_count / reap_count: retry and recovery counters
 
-A common local source grant is:
+Status meanings:
 
-```bash
-sudo mysql -e "GRANT SELECT ON deedspot.* TO 'pa_indexer'@'localhost'; FLUSH PRIVILEGES;"
-```
+| Status | Meaning |
+| --- | --- |
+| P | Pending. The job is waiting to be claimed by a worker. |
+| R | Running. The job has been claimed and is currently being processed, or it is a stale running job waiting to be reclaimed. |
+| D | Done. The job was processed successfully and the indexed state for that entity is now considered current. |
+| S | Superseded. A newer job for the same entity arrived, so this older job was collapsed and skipped. |
+| F | Failed. The job exhausted its retry budget and is no longer retried automatically. |
 
-The application-side MySQL user also needs permission to enqueue jobs:
+Action meanings:
 
-```sql
-GRANT INSERT ON pa_opensearch_indexer.search_index_jobs TO 'app_user'@'app_host';
-```
+| Action | Meaning |
+| --- | --- |
+| I | Insert or index. The entity should be created or refreshed in OpenSearch. |
+| U | Update or rebuild. The current document should be rebuilt from the source database and written back to OpenSearch. |
+| D | Delete. The document should be removed from OpenSearch. |
+
+Batching and collapsing:
+
+Workers do not process every queued row blindly. They claim a batch of eligible jobs, collapse duplicate work for the same entity, and keep only the latest job as the winner. That means a new update can supersede an older one, reducing redundant work and making the queue behave more like a change stream than a list of independent tasks.
+
+### State ledger: search_index_state
+
+This table keeps a durable per-entity checkpoint of what was last indexed or failed. It is the authoritative compact ledger for cleanup and reconciliation.
+
+A key design detail is that ownership and status are separate:
+
+- R with claim_id set = actively owned by a worker
+- R with claim_id null = orphaned/reclaimable
+
+That separation avoids the old churn of repeatedly flipping running jobs back to pending.
+
+### Queue concurrency model
+
+The worker uses a deterministic locking approach to claim jobs safely and avoid
+the deadlocks that came from older update-heavy patterns. The current flow is
+based on selecting eligible jobs, using `FOR UPDATE SKIP LOCKED` to claim them
+without blocking on already-locked rows, and then updating by primary key rather
+than rewriting the same rows through broad update joins.
+
+The early design used broader update patterns, including update joins against
+the same queue table. Those are risky under concurrency because MySQL can lock
+secondary-index ranges in different orders for different workers. Another
+problematic pattern was stale recovery that changed jobs from `R` back to `P`;
+that rewrote the indexed `status` column while other workers were scanning and
+locking pending rows.
+
+The current design avoids those failure modes:
+
+1. Select a small deterministic seed batch.
+2. Lock eligible rows with `FOR UPDATE SKIP LOCKED`.
+3. Expand by entity only through ordered primary-key row locks.
+4. Update claimed rows by primary key.
+5. Keep stale recovery as ownership cleanup, not `R -> P` status churn.
+
+Instead of treating status as ownership, the queue uses a two-part coordination
+model:
+
+- `status` describes the lifecycle state of the job: pending, running, done, superseded, or failed.
+- `claim_id` describes ownership for in-flight work. A running job with a claim is considered actively owned; a running job without a claim is orphaned/reclaimable.
+
+That split is what keeps multiple workers and reapers from getting tangled up. Workers only claim jobs that are pending or orphaned-running, and a reaper can recover stale ownership by clearing claim information without converting the job back to pending. This prevents workers from fighting over the same row, avoids oscillation between `R` and `P`, and keeps the system safe under concurrent processing.
+
+Practical rules for future changes:
+
+- Prefer primary-key updates after selecting/locking job IDs.
+- Avoid update joins that rewrite `search_index_jobs` while workers are also
+  claiming from it.
+- Avoid unnecessary writes to indexed coordination columns such as `status`.
+- Keep transactions short and ordered by `job_id` where possible.
+- Treat MySQL deadlocks and lock-wait timeouts as retryable database events.
+- Use `available_at` for retry backoff, scheduling, or throttling; it is not the
+  core correctness mechanism.
+
+### Source visibility rule
+
+For campaign actions, the worker rebuilds the document from the source row and uses the same visibility logic as the loader. Visibility is a special boolean-style decision derived from denormalized campaign information plus specific values on the campaign action itself, and it is reduced to a binary choice: either the action is feed-visible and should be indexed, or it is not and the document should be removed from OpenSearch. In other words, the service does not index stale or hidden rows just because a queue job exists; it checks the current source state and only keeps the document when the current visibility criteria still pass.
+
+### Worker flow
+
+The worker follows a simple lifecycle for each batch of jobs:
+
+1. Fetch eligible pending jobs and orphaned running jobs using `FOR UPDATE SKIP LOCKED`.
+2. Assign a batch-level claim so the batch is treated as a single ownership unit.
+3. Collapse duplicate jobs by `(entity_type, entity_id)` and keep only the newest job as the winner.
+4. Rebuild the document from the current source database state.
+5. Upsert or delete the OpenSearch document for the winning entity.
+6. Mark the winning job as done and mark the collapsed duplicates as superseded.
+
+The worker treats queue rows as change signals, not as the source of truth. The final document is rebuilt from the latest database state at processing time.
+
+### Reaper flow
+
+The reaper is responsible for recovery, not cleanup. Its job is to find running jobs that appear stale because their claim never got cleared, then release ownership without changing the job back to pending:
+
+1. Find running jobs with an active claim that have been running longer than the configured stale threshold.
+2. Clear `claim_id`, `worker_id`, and related ownership timestamps.
+3. Leave the job in running state so it can be reclaimed later by a worker if needed.
+
+This prevents the queue from oscillating between `R` and `P` and keeps ownership recovery separate from normal processing.
+
+### When jobs are removed
+
+The queue is not kept forever. Terminal rows are removed once the durable state table has a checkpoint for the same entity. In practice:
+
+- done, superseded, and failed jobs can be cleaned up after `search_index_state` records a durable outcome for the entity
+- cleanup happens in two ways: entity-scoped cleanup for the just-processed batch and a bounded global sweep for older terminal rows
+- the state table is the durable log of what happened and what is currently indexed for that entity
+
+That makes `search_index_state` the main place to inspect the last successful or failed outcome for an entity, while the queue table remains primarily a work queue and not the long-term history store.
+
+### Failure handling
+
+Failures are handled in two layers:
+
+- transient processing failures are retried according to the retry policy until the configured maximum is reached
+- once a job reaches the failure threshold, it becomes a failed terminal job and is no longer retried automatically
+
+The worker records failure context and the reaper can recover stale ownership without turning a legitimate running job into a fresh pending job. Operators can inspect failed state from `search_index_state`, then requeue work by inserting a fresh pending job if reconciliation is needed.
 
 ---
 
@@ -245,13 +347,8 @@ cd /opt/pa_services/feed-opensearch-indexer
 ./feed_opensearch_ctl.sh db:install
 ./feed_opensearch_ctl.sh db:status
 ./feed_opensearch_ctl.sh source:status
-```
 
-If you are using the bundled local OpenSearch container, install Docker for the host OS. Choose exactly one of the following sections.
-
-Ubuntu/Debian:
-
-```bash
+# Ubuntu/Debian
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -269,21 +366,14 @@ sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo docker run hello-world
-```
 
-CentOS/RHEL:
-
-```bash
+# CentOS/RHEL
 sudo dnf -y install dnf-plugins-core
 sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo docker run hello-world
-```
 
-Continue the service install:
-
-```bash
 ./feed_opensearch_ctl.sh opensearch:install
 ./feed_opensearch_ctl.sh opensearch:index:create
 ./feed_opensearch_ctl.sh opensearch:health
@@ -298,6 +388,74 @@ Continue the service install:
 ./feed_opensearch_ctl.sh services:restart
 ./feed_opensearch_ctl.sh services:status
 ```
+
+---
+
+## Application enqueue examples
+
+The application-side enqueue path is intentionally simple: write the source change, then insert a row into `search_index_jobs` with the appropriate action. The PHP helper in [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) shows the general pattern, and the examples below cover the three main cases.
+
+The examples show the two logical operations separately. They are not meant to
+force a specific transaction shape. If the source database and indexer database
+are on the same MySQL server and the application user has the right grants, the
+application may choose to enqueue in the same transaction as the source write.
+If not, enqueue immediately after the source write commits and let the indexer
+remain eventually consistent.
+
+### 1. Updated campaign action
+
+Use an update action when a campaign action changed in a way that should refresh the OpenSearch document from the current source state.
+
+```sql
+UPDATE deedspot.campaign_actions
+SET title = 'Updated title', modified_at = UNIX_TIMESTAMP()
+WHERE `index` = ?;
+```
+
+```sql
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
+VALUES ('campaign_action', ?, 'U', 0, 'app');
+```
+
+See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
+
+### 2. Campaign action becomes not visible
+
+Use an update action when the action is still changing, but the current source state means it should no longer be indexed. A common example is closing the action: the worker will rebuild the document, see that the action is no longer feed-visible, and remove the document from OpenSearch.
+
+```sql
+UPDATE deedspot.campaign_actions
+SET status = 'closed'
+WHERE `index` = ?;
+```
+
+```sql
+-- This is still an update job, but the indexer will remove the document
+-- from OpenSearch because the current state is no longer feed-visible.
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
+VALUES ('campaign_action', ?, 'U', 0, 'app');
+```
+
+See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
+
+### 3. Deleted campaign action
+
+Use a delete action when the source row is being removed and the corresponding OpenSearch document should also disappear.
+
+```sql
+DELETE FROM deedspot.campaign_actions
+WHERE `index` = ?;
+```
+
+```sql
+INSERT INTO pa_opensearch_indexer.search_index_jobs
+  (entity_type, entity_id, action, priority, source)
+VALUES ('campaign_action', ?, 'D', 0, 'app');
+```
+
+See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
 
 ---
 
@@ -419,74 +577,6 @@ and pages through the source rows using the configured page size:
 ```bash
 OPENSEARCH_LOADER_PAGE_SIZE=10000
 ```
-
----
-
-## Application enqueue examples
-
-The application-side enqueue path is intentionally simple: write the source change, then insert a row into `search_index_jobs` with the appropriate action. The PHP helper in [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) shows the general pattern, and the examples below cover the three main cases.
-
-The examples show the two logical operations separately. They are not meant to
-force a specific transaction shape. If the source database and indexer database
-are on the same MySQL server and the application user has the right grants, the
-application may choose to enqueue in the same transaction as the source write.
-If not, enqueue immediately after the source write commits and let the indexer
-remain eventually consistent.
-
-### 1. Updated campaign action
-
-Use an update action when a campaign action changed in a way that should refresh the OpenSearch document from the current source state.
-
-```sql
-UPDATE deedspot.campaign_actions
-SET title = 'Updated title', modified_at = UNIX_TIMESTAMP()
-WHERE `index` = ?;
-```
-
-```sql
-INSERT INTO pa_opensearch_indexer.search_index_jobs
-  (entity_type, entity_id, action, priority, source)
-VALUES ('campaign_action', ?, 'U', 0, 'app');
-```
-
-See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
-
-### 2. Campaign action becomes not visible
-
-Use an update action when the action is still changing, but the current source state means it should no longer be indexed. A common example is closing the action: the worker will rebuild the document, see that the action is no longer feed-visible, and remove the document from OpenSearch.
-
-```sql
-UPDATE deedspot.campaign_actions
-SET status = 'closed'
-WHERE `index` = ?;
-```
-
-```sql
--- This is still an update job, but the indexer will remove the document
--- from OpenSearch because the current state is no longer feed-visible.
-INSERT INTO pa_opensearch_indexer.search_index_jobs
-  (entity_type, entity_id, action, priority, source)
-VALUES ('campaign_action', ?, 'U', 0, 'app');
-```
-
-See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
-
-### 3. Deleted campaign action
-
-Use a delete action when the source row is being removed and the corresponding OpenSearch document should also disappear.
-
-```sql
-DELETE FROM deedspot.campaign_actions
-WHERE `index` = ?;
-```
-
-```sql
-INSERT INTO pa_opensearch_indexer.search_index_jobs
-  (entity_type, entity_id, action, priority, source)
-VALUES ('campaign_action', ?, 'D', 0, 'app');
-```
-
-See [examples/php/feed_opensearch_enqueue.php](examples/php/feed_opensearch_enqueue.php) for the same pattern in PHP.
 
 ---
 
@@ -673,144 +763,5 @@ Common issues and fixes:
 - Missing index: create it with opensearch:index:create and rebuild if needed.
 - Stale running jobs: let the reaper recover them or inspect the queue state table.
 - Docker access problems: ensure the deployer account can reach Docker, or use sudo-compatible access for the control script.
-
----
-
-## Internal design and semantics
-
-### Queue table: search_index_jobs
-
-This is the indexer-owned work queue. Each row is a signal that something changed and the search projection should be refreshed.
-
-Important fields:
-
-- entity_type / entity_id: identifies the affected source entity
-- action: I, U, or D
-- status: P, R, D, S, or F
-- claim_id / worker_id: ownership markers for in-flight work
-- retry_count / reap_count: retry and recovery counters
-
-Status meanings:
-
-| Status | Meaning |
-| --- | --- |
-| P | Pending. The job is waiting to be claimed by a worker. |
-| R | Running. The job has been claimed and is currently being processed, or it is a stale running job waiting to be reclaimed. |
-| D | Done. The job was processed successfully and the indexed state for that entity is now considered current. |
-| S | Superseded. A newer job for the same entity arrived, so this older job was collapsed and skipped. |
-| F | Failed. The job exhausted its retry budget and is no longer retried automatically. |
-
-Action meanings:
-
-| Action | Meaning |
-| --- | --- |
-| I | Insert or index. The entity should be created or refreshed in OpenSearch. |
-| U | Update or rebuild. The current document should be rebuilt from the source database and written back to OpenSearch. |
-| D | Delete. The document should be removed from OpenSearch. |
-
-`status = D` and `action = D` are different things. `status = D` means the queue job is done; `action = D` means the OpenSearch document should be deleted.
-
-Batching and collapsing:
-
-Workers do not process every queued row blindly. They claim a batch of eligible jobs, collapse duplicate work for the same entity, and keep only the latest job as the winner. That means a new update can supersede an older one, reducing redundant work and making the queue behave more like a change stream than a list of independent tasks.
-
-### State ledger: search_index_state
-
-This table keeps a durable per-entity checkpoint of what was last indexed or failed. It is the authoritative compact ledger for cleanup and reconciliation.
-
-A key design detail is that ownership and status are separate:
-
-- R with claim_id set = actively owned by a worker
-- R with claim_id null = orphaned/reclaimable
-
-That separation avoids the old churn of repeatedly flipping running jobs back to pending.
-
-### Queue concurrency model
-
-The worker uses a deterministic locking approach to claim jobs safely and avoid
-the deadlocks that came from older update-heavy patterns. The current flow is
-based on selecting eligible jobs, using `FOR UPDATE SKIP LOCKED` to claim them
-without blocking on already-locked rows, and then updating by primary key rather
-than rewriting the same rows through broad update joins.
-
-The early design used broader update patterns, including update joins against
-the same queue table. Those are risky under concurrency because MySQL can lock
-secondary-index ranges in different orders for different workers. Another
-problematic pattern was stale recovery that changed jobs from `R` back to `P`;
-that rewrote the indexed `status` column while other workers were scanning and
-locking pending rows.
-
-The current design avoids those failure modes:
-
-1. Select a small deterministic seed batch.
-2. Lock eligible rows with `FOR UPDATE SKIP LOCKED`.
-3. Expand by entity only through ordered primary-key row locks.
-4. Update claimed rows by primary key.
-5. Keep stale recovery as ownership cleanup, not `R -> P` status churn.
-
-Instead of treating status as ownership, the queue uses a two-part coordination
-model:
-
-- `status` describes the lifecycle state of the job: pending, running, done, superseded, or failed.
-- `claim_id` describes ownership for in-flight work. A running job with a claim is considered actively owned; a running job without a claim is orphaned/reclaimable.
-
-That split is what keeps multiple workers and reapers from getting tangled up. Workers only claim jobs that are pending or orphaned-running, and a reaper can recover stale ownership by clearing claim information without converting the job back to pending. This prevents workers from fighting over the same row, avoids oscillation between `R` and `P`, and keeps the system safe under concurrent processing.
-
-Practical rules for future changes:
-
-- Prefer primary-key updates after selecting/locking job IDs.
-- Avoid update joins that rewrite `search_index_jobs` while workers are also
-  claiming from it.
-- Avoid unnecessary writes to indexed coordination columns such as `status`.
-- Keep transactions short and ordered by `job_id` where possible.
-- Treat MySQL deadlocks and lock-wait timeouts as retryable database events.
-- Use `available_at` for retry backoff, scheduling, or throttling; it is not the
-  core correctness mechanism.
-
-### Source visibility rule
-
-For campaign actions, the worker rebuilds the document from the source row and uses the same visibility logic as the loader. Visibility is a special boolean-style decision derived from denormalized campaign information plus specific values on the campaign action itself, and it is reduced to a binary choice: either the action is feed-visible and should be indexed, or it is not and the document should be removed from OpenSearch. In other words, the service does not index stale or hidden rows just because a queue job exists; it checks the current source state and only keeps the document when the current visibility criteria still pass.
-
-### Worker flow
-
-The worker follows a simple lifecycle for each batch of jobs:
-
-1. Fetch eligible pending jobs and orphaned running jobs using `FOR UPDATE SKIP LOCKED`.
-2. Assign a batch-level claim so the batch is treated as a single ownership unit.
-3. Collapse duplicate jobs by `(entity_type, entity_id)` and keep only the newest job as the winner.
-4. Rebuild the document from the current source database state.
-5. Upsert or delete the OpenSearch document for the winning entity.
-6. Mark the winning job as done and mark the collapsed duplicates as superseded.
-
-The worker treats queue rows as change signals, not as the source of truth. The final document is rebuilt from the latest database state at processing time.
-
-### Reaper flow
-
-The reaper is responsible for recovery, not cleanup. Its job is to find running jobs that appear stale because their claim never got cleared, then release ownership without changing the job back to pending:
-
-1. Find running jobs with an active claim that have been running longer than the configured stale threshold.
-2. Clear `claim_id`, `worker_id`, and related ownership timestamps.
-3. Leave the job in running state so it can be reclaimed later by a worker if needed.
-
-This prevents the queue from oscillating between `R` and `P` and keeps ownership recovery separate from normal processing.
-
-### When jobs are removed
-
-The queue is not kept forever. Terminal rows are removed once the durable state table has a checkpoint for the same entity. In practice:
-
-- done, superseded, and failed jobs can be cleaned up after `search_index_state` records a durable outcome for the entity
-- cleanup happens in two ways: entity-scoped cleanup for the just-processed batch and a bounded global sweep for older terminal rows
-- the state table is the durable log of what happened and what is currently indexed for that entity
-
-That makes `search_index_state` the main place to inspect the last successful or failed outcome for an entity, while the queue table remains primarily a work queue and not the long-term history store.
-
-### Failure handling
-
-Failures are handled in two layers:
-
-- transient processing failures are retried according to the retry policy until the configured maximum is reached
-- once a job reaches the failure threshold, it becomes a failed terminal job and is no longer retried automatically
-
-The worker records failure context and the reaper can recover stale ownership without turning a legitimate running job into a fresh pending job. Operators can inspect failed state from `search_index_state`, then requeue work by inserting a fresh pending job if reconciliation is needed.
 
 ---

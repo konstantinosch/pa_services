@@ -75,17 +75,32 @@ The service therefore combines three pieces:
 
 ## Before you install
 
-Collect these details before running the installer on a new host:
+Collect the external/project-specific details before running the installer on a new host:
 
 | Needed detail | Why it matters | Example |
 | --- | --- | --- |
 | Source MySQL host, port, and database | The loader and worker read campaign actions from the source of truth. | `localhost:3306`, `deedspot` |
 | Source MySQL read credentials | The worker needs read access to the tables used by the document SQL. | `pa_indexer` with `SELECT` grants |
-| Indexer MySQL admin path | `db:install` creates the queue database, runtime user, grants, and schema. | `sudo mysql` |
-| OpenSearch endpoint | The worker and loader need a target index. | `http://localhost:9200` |
 | OpenSearch deployment choice | Use a managed/external cluster or the bundled local Docker container. | bundled Docker for test hosts |
-| Application enqueue user | The app needs permission to insert queue jobs. | `INSERT` on `pa_opensearch_indexer.search_index_jobs` |
-| Linux service user | systemd runs worker/reaper under this account. | `pa_indexer` |
+| OpenSearch endpoint, if external | The worker and loader need a target index. | `https://search.example.internal` |
+| Application enqueue user/host | The app needs permission to insert queue jobs. | `app_user` from `app_host` |
+
+The installer can create or configure these local service pieces if you keep the defaults:
+
+| Local piece | Default | Created/configured by |
+| --- | --- | --- |
+| Indexer queue/state database | `pa_opensearch_indexer` | `./feed_opensearch_ctl.sh db:install` |
+| Indexer MySQL runtime user | `pa_indexer` | `./feed_opensearch_ctl.sh db:install` |
+| Linux service user/group | `pa_indexer` / `pa_indexer` | `./feed_opensearch_ctl.sh install-service-user` |
+| Local OpenSearch endpoint | `http://localhost:9200` | `./feed_opensearch_ctl.sh opensearch:install` |
+| systemd worker/reaper units | `pa-feed-opensearch-worker@N`, `pa-feed-opensearch-reaper@N` | `./feed_opensearch_ctl.sh install-systemd` |
+
+The installer still needs a MySQL admin path for `db:install`, usually:
+
+```bash
+MYSQL_ADMIN_BIN=sudo
+MYSQL_ADMIN_ARGS=mysql
+```
 
 The service uses two different MySQL roles:
 

@@ -618,14 +618,7 @@ The intended recovery model is:
 - released jobs wait `REAPER_RELEASE_DELAY_SECONDS` before another worker can reclaim them
 - the initial loader can rebuild OpenSearch from the source database if local index data is lost
 
-Planned operator commands:
-
-```bash
-./feed_opensearch_ctl.sh verify
-./feed_opensearch_ctl.sh queue:status
-./feed_opensearch_ctl.sh opensearch:count
-./feed_opensearch_ctl.sh opensearch:drift
-```
+Future operator helpers may wrap these checks into one command, but the commands listed above are the current supported runbook.
 
 ### Local OpenSearch with Docker
 

@@ -17,14 +17,16 @@ pa_services/
 │   ├── app/                   # Python worker, reaper, loader, config helpers
 │   ├── db/                    # MySQL adapter and schema helpers
 │   ├── docker/opensearch/     # local OpenSearch docker-compose setup
-│   ├── sql/                   # MySQL and OpenSearch SQL/schema assets
-│   ├── docs/                  # historical notes kept for reference
+│   ├── examples/php/          # application-side enqueue helper example
+│   ├── opensearch/            # OpenSearch index mappings and query artifacts
+│   ├── sql/                   # MySQL source/indexer schema and loader SQL assets
+│   ├── README.md              # service-specific documentation
 │   ├── config.example.env     # example configuration for the indexer
+│   ├── requirements.txt       # Python runtime dependencies
 │   └── feed_opensearch_ctl.sh # control script for install / configure / manage
 ├── feed-ram-refresh/
 │   ├── sql/                   # RAM refresh SQL and state-table setup
 │   ├── README.md              # service-specific documentation
-│   ├── config.env             # local runtime configuration
 │   └── feed_ram_ctl.sh        # control script for refresh / cron / logrotate
 └── README.md                  # this file
 ```

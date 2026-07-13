@@ -80,6 +80,8 @@ The current implementation focuses on `campaign_action` documents.
 
 The worker treats queue rows as change signals, not as the source of truth. The final document is rebuilt from the current source row in MySQL.
 
+For the full service overview, see [feed-opensearch-indexer/README.md](feed-opensearch-indexer/README.md).
+
 ## 2. Feed RAM Refresh
 
 ### What it does

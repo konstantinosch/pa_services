@@ -8,7 +8,6 @@ VENV_DIR="${FEED_OPENSEARCH_VENV:-${SERVICE_DIR}/venv}"
 REQUIREMENTS_FILE="${SERVICE_DIR}/requirements.txt"
 INDEXER_SCHEMA_FILE="${SERVICE_DIR}/sql/indexer/schema_mysql.sql"
 OPENSEARCH_INDEX_FILE="${SERVICE_DIR}/opensearch/campaign_actions_feed.index.json"
-OPENSEARCH_DISCOVERY_QUERY_FILE="${SERVICE_DIR}/opensearch/query_stage_d_unrelated_discovery.json"
 OPENSEARCH_FULL_INDEX_SQL_FILE="${SERVICE_DIR}/sql/opensearch/campaign_actions_feed_full_index.sql"
 SYSTEMD_WORKER_TEMPLATE="${FEED_OPENSEARCH_WORKER_TEMPLATE:-pa-feed-opensearch-worker@.service}"
 SYSTEMD_REAPER_TEMPLATE="${FEED_OPENSEARCH_REAPER_TEMPLATE:-pa-feed-opensearch-reaper@.service}"
@@ -2019,7 +2018,6 @@ opensearch_timeout_seconds=${OPENSEARCH_TIMEOUT_SECONDS}
 opensearch_wait_seconds=${OPENSEARCH_WAIT_SECONDS}
 opensearch_loader_page_size=${OPENSEARCH_LOADER_PAGE_SIZE}
 opensearch_index_file=${OPENSEARCH_INDEX_FILE}
-opensearch_discovery_query_file=${OPENSEARCH_DISCOVERY_QUERY_FILE}
 opensearch_full_index_sql_file=${OPENSEARCH_FULL_INDEX_SQL_FILE}
 indexer_schema_file=${INDEXER_SCHEMA_FILE}
 log_file=${LOG_FILE}
@@ -2308,7 +2306,6 @@ doctor() {
   doctor_check_file indexer_schema "${INDEXER_SCHEMA_FILE}"
   doctor_check_file compose "${COMPOSE_FILE}"
   doctor_check_file opensearch_index "${OPENSEARCH_INDEX_FILE}"
-  doctor_check_file opensearch_query "${OPENSEARCH_DISCOVERY_QUERY_FILE}"
   doctor_check_file opensearch_full_index_sql "${OPENSEARCH_FULL_INDEX_SQL_FILE}"
   if [[ -x "${VENV_DIR}/bin/python" ]]; then
     printf 'ok   venv python %s\n' "${VENV_DIR}/bin/python"

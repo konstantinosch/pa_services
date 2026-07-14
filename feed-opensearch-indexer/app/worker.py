@@ -7,9 +7,9 @@
 # - Jobs are processed in batches and compressed per (entity_type, entity_id)
 # - Latest job (by created_at, job_id) wins per entity
 #
-# FUTURE CONSISTENCY MODEL:
-# - entity_state will hold latest processed state per (entity_type, entity_id)
-# - freshness guard will prevent stale jobs from overwriting newer results
+# STATE MODEL:
+# - search_index_state stores the latest indexed/deleted/failed checkpoint per entity
+# - terminal queue rows are cleaned only after the state checkpoint covers them
 #
 # ============================================================
 

@@ -55,9 +55,6 @@ class DbAdapter:
     def cleanup_state_covered_terminal_jobs(self, limit: int = 10000):
         raise NotImplementedError
 
-    def fetch_item_document(self, item_id: str):
-        raise NotImplementedError
-
     def reap_stale_jobs(self, stale_seconds: int, delay_seconds: int, limit: int = 1000):
         raise NotImplementedError
 

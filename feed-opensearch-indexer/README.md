@@ -217,6 +217,11 @@ cd /opt/pa_services/feed-opensearch-indexer
 ./feed_opensearch_ctl.sh db:status
 
 # This should pass after SOURCE_MYSQL_* and source grants are configured.
+# Example source read grant for local tests:
+# sudo mysql -e "GRANT SELECT ON deedspot.* TO 'pa_indexer'@'localhost'; FLUSH PRIVILEGES;"
+#
+# Example application enqueue grant; replace app_user/app_host:
+# sudo mysql -e "GRANT INSERT ON pa_opensearch_indexer.search_index_jobs TO 'app_user'@'app_host'; FLUSH PRIVILEGES;"
 ./feed_opensearch_ctl.sh source:status
 ```
 

@@ -138,7 +138,7 @@ The service expects:
 - Python 3 and a virtual environment
 - MySQL client access and an external MySQL server
 - OpenSearch access, either via a managed external cluster or the bundled local container
-- systemd for worker and reaper daemons
+- systemd for worker and reaper services
 - Docker only when you want to run the bundled local OpenSearch service
 
 ### 2. Bootstrap the runtime
@@ -187,7 +187,7 @@ For the bundled local path:
 ./feed_opensearch_ctl.sh opensearch:health
 ```
 
-### 5. Install service account and daemons
+### 5. Install service account and services
 
 The worker and reaper should run as a dedicated Linux service account. The control script can create that user and install systemd units:
 
@@ -296,7 +296,7 @@ Create it from the example file:
 ./feed_opensearch_ctl.sh init-config
 ```
 
-The example config is in [config.example.env](config.example.env).
+The example config is in [config.example.env](config.example.env). Python dependencies are listed in [requirements.txt](requirements.txt) and installed by `setup-venv`.
 
 ### MySQL configuration
 
@@ -324,6 +324,8 @@ SOURCE_MYSQL_SUDO=1
 ```
 
 If SOURCE_MYSQL_USER is empty, the worker will reuse the indexer MySQL credentials; for production, it is better to provide a dedicated read-only source user.
+
+`SOURCE_MYSQL_SUDO=1` is only for the bulk loader path, where the control script can run the MySQL CLI through `sudo`. The long-running worker uses the Python MySQL connector, so it still needs real source database credentials and `SELECT` grants.
 
 The source user must be able to read the source tables used by the OpenSearch document SQL. For local testing with the bundled `deedspot` database, the simplest grant is:
 

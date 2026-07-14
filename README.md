@@ -18,8 +18,8 @@ pa_services/
 │   ├── db/                    # MySQL adapter and schema helpers
 │   ├── docker/opensearch/     # local OpenSearch docker-compose setup
 │   ├── examples/php/          # application-side enqueue helper example
-│   ├── opensearch/            # OpenSearch index mappings and query artifacts
-│   ├── sql/                   # MySQL source/indexer schema and loader SQL assets
+│   ├── opensearch/            # OpenSearch index mapping
+│   ├── sql/                   # indexer schema and loader SQL assets
 │   ├── README.md              # service-specific documentation
 │   ├── config.example.env     # example configuration for the indexer
 │   ├── requirements.txt       # Python runtime dependencies
@@ -37,7 +37,7 @@ pa_services/
 
 | Service | Purpose | Runtime | Primary Data Stores |
 | --- | --- | --- | --- |
-| feed-opensearch-indexer | Queue-driven indexing of campaign actions into OpenSearch | worker + reaper daemons | MySQL queue/state tables + OpenSearch |
+| feed-opensearch-indexer | Queue-driven indexing of campaign actions into OpenSearch | worker + reaper services | MySQL queue/state tables + OpenSearch |
 | feed-ram-refresh | Rebuilds MySQL MEMORY feed tables for fast reads | cron-driven refresh jobs | MySQL MEMORY tables + live MySQL |
 
 ---

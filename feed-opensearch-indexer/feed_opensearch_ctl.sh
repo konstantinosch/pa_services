@@ -63,10 +63,19 @@ OPENSEARCH_INITIAL_ADMIN_PASSWORD="${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-Pa_OpenS
 OPENSEARCH_LOADER_PAGE_SIZE="${OPENSEARCH_LOADER_PAGE_SIZE:-10000}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 LOG_FILE="${LOG_FILE:-logs/pa_opensearch_indexer.log}"
+WORKER_POLL_INTERVAL_SECONDS="${WORKER_POLL_INTERVAL_SECONDS:-2}"
+WORKER_BATCH_DELAY_SECONDS="${WORKER_BATCH_DELAY_SECONDS:-0}"
 WORKER_BATCH_SIZE="${WORKER_BATCH_SIZE:-100}"
 WORKER_CLAIM_STRATEGY="${WORKER_CLAIM_STRATEGY:-simple}"
+WORKER_RETRY_DELAY_SECONDS="${WORKER_RETRY_DELAY_SECONDS:-0}"
 WORKER_MAX_RETRIES="${WORKER_MAX_RETRIES:-10}"
 JOB_CLEANUP_BATCH_SIZE="${JOB_CLEANUP_BATCH_SIZE:-10000}"
+DB_RETRY_ATTEMPTS="${DB_RETRY_ATTEMPTS:-3}"
+DB_RETRY_BASE_DELAY_SECONDS="${DB_RETRY_BASE_DELAY_SECONDS:-0.1}"
+DB_RETRY_MAX_DELAY_SECONDS="${DB_RETRY_MAX_DELAY_SECONDS:-2}"
+REAPER_POLL_INTERVAL_SECONDS="${REAPER_POLL_INTERVAL_SECONDS:-60}"
+REAPER_BATCH_DELAY_SECONDS="${REAPER_BATCH_DELAY_SECONDS:-0.5}"
+REAPER_BATCH_SIZE="${REAPER_BATCH_SIZE:-1000}"
 REAPER_STALE_SECONDS="${REAPER_STALE_SECONDS:-120}"
 REAPER_RELEASE_DELAY_SECONDS="${REAPER_RELEASE_DELAY_SECONDS:-30}"
 WORKER_COUNT="${WORKER_COUNT:-1}"
@@ -418,6 +427,7 @@ configure() {
   local opensearch_admin_password
   local log_file
   local python_bin
+  local bash_bin
 
   log_info "Writing interactive config: ${CONFIG_FILE}"
 
@@ -464,12 +474,23 @@ configure() {
   if [[ -z "${source_mysql_password}" ]]; then
     source_mysql_password="${SOURCE_MYSQL_PASSWORD}"
   fi
+  LOG_LEVEL="$(prompt_value LOG_LEVEL "${LOG_LEVEL}")"
   log_file="$(prompt_value LOG_FILE "${LOG_FILE}")"
-  python_bin="$(prompt_value PYTHON_BIN "${VENV_DIR}/bin/python")"
+  python_bin="$(prompt_value PYTHON_BIN "${PYTHON_BIN}")"
+  bash_bin="$(prompt_value BASH_BIN "${BASH_BIN}")"
+  WORKER_POLL_INTERVAL_SECONDS="$(prompt_value WORKER_POLL_INTERVAL_SECONDS "${WORKER_POLL_INTERVAL_SECONDS}")"
+  WORKER_BATCH_DELAY_SECONDS="$(prompt_value WORKER_BATCH_DELAY_SECONDS "${WORKER_BATCH_DELAY_SECONDS}")"
   WORKER_BATCH_SIZE="$(prompt_value WORKER_BATCH_SIZE "${WORKER_BATCH_SIZE}")"
   WORKER_CLAIM_STRATEGY="$(prompt_value WORKER_CLAIM_STRATEGY "${WORKER_CLAIM_STRATEGY}")"
+  WORKER_RETRY_DELAY_SECONDS="$(prompt_value WORKER_RETRY_DELAY_SECONDS "${WORKER_RETRY_DELAY_SECONDS}")"
   WORKER_MAX_RETRIES="$(prompt_value WORKER_MAX_RETRIES "${WORKER_MAX_RETRIES}")"
   JOB_CLEANUP_BATCH_SIZE="$(prompt_value JOB_CLEANUP_BATCH_SIZE "${JOB_CLEANUP_BATCH_SIZE}")"
+  DB_RETRY_ATTEMPTS="$(prompt_value DB_RETRY_ATTEMPTS "${DB_RETRY_ATTEMPTS}")"
+  DB_RETRY_BASE_DELAY_SECONDS="$(prompt_value DB_RETRY_BASE_DELAY_SECONDS "${DB_RETRY_BASE_DELAY_SECONDS}")"
+  DB_RETRY_MAX_DELAY_SECONDS="$(prompt_value DB_RETRY_MAX_DELAY_SECONDS "${DB_RETRY_MAX_DELAY_SECONDS}")"
+  REAPER_POLL_INTERVAL_SECONDS="$(prompt_value REAPER_POLL_INTERVAL_SECONDS "${REAPER_POLL_INTERVAL_SECONDS}")"
+  REAPER_BATCH_DELAY_SECONDS="$(prompt_value REAPER_BATCH_DELAY_SECONDS "${REAPER_BATCH_DELAY_SECONDS}")"
+  REAPER_BATCH_SIZE="$(prompt_value REAPER_BATCH_SIZE "${REAPER_BATCH_SIZE}")"
   REAPER_STALE_SECONDS="$(prompt_value REAPER_STALE_SECONDS "${REAPER_STALE_SECONDS}")"
   REAPER_RELEASE_DELAY_SECONDS="$(prompt_value REAPER_RELEASE_DELAY_SECONDS "${REAPER_RELEASE_DELAY_SECONDS}")"
   WORKER_COUNT="$(prompt_value WORKER_COUNT "${WORKER_COUNT}")"
@@ -510,24 +531,25 @@ OPENSEARCH_INITIAL_ADMIN_PASSWORD=$(shell_quote "${opensearch_admin_password}")
 OPENSEARCH_LOADER_PAGE_SIZE=$(shell_quote "${OPENSEARCH_LOADER_PAGE_SIZE}")
 
 PYTHON_BIN=$(shell_quote "${python_bin}")
+BASH_BIN=$(shell_quote "${bash_bin}")
 LOG_LEVEL=$(shell_quote "${LOG_LEVEL}")
 LOG_FILE=$(shell_quote "${log_file}")
 
-WORKER_POLL_INTERVAL_SECONDS=2
-WORKER_BATCH_DELAY_SECONDS=0
+WORKER_POLL_INTERVAL_SECONDS=${WORKER_POLL_INTERVAL_SECONDS}
+WORKER_BATCH_DELAY_SECONDS=${WORKER_BATCH_DELAY_SECONDS}
 WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE}
 WORKER_CLAIM_STRATEGY=$(shell_quote "${WORKER_CLAIM_STRATEGY}")
-WORKER_RETRY_DELAY_SECONDS=0
+WORKER_RETRY_DELAY_SECONDS=${WORKER_RETRY_DELAY_SECONDS}
 WORKER_MAX_RETRIES=${WORKER_MAX_RETRIES}
 JOB_CLEANUP_BATCH_SIZE=${JOB_CLEANUP_BATCH_SIZE}
 
-DB_RETRY_ATTEMPTS=3
-DB_RETRY_BASE_DELAY_SECONDS=0.1
-DB_RETRY_MAX_DELAY_SECONDS=2
+DB_RETRY_ATTEMPTS=${DB_RETRY_ATTEMPTS}
+DB_RETRY_BASE_DELAY_SECONDS=${DB_RETRY_BASE_DELAY_SECONDS}
+DB_RETRY_MAX_DELAY_SECONDS=${DB_RETRY_MAX_DELAY_SECONDS}
 
-REAPER_POLL_INTERVAL_SECONDS=60
-REAPER_BATCH_DELAY_SECONDS=0.5
-REAPER_BATCH_SIZE=1000
+REAPER_POLL_INTERVAL_SECONDS=${REAPER_POLL_INTERVAL_SECONDS}
+REAPER_BATCH_DELAY_SECONDS=${REAPER_BATCH_DELAY_SECONDS}
+REAPER_BATCH_SIZE=${REAPER_BATCH_SIZE}
 REAPER_STALE_SECONDS=${REAPER_STALE_SECONDS}
 REAPER_RELEASE_DELAY_SECONDS=${REAPER_RELEASE_DELAY_SECONDS}
 
@@ -764,7 +786,7 @@ systemctl_enable_unit() {
 }
 
 systemctl_disable_now_unit() {
-  run_systemctl disable --now "$1" || true
+  run_systemctl disable --now "$1" >/dev/null 2>&1 || true
 }
 
 systemctl_status_unit() {
@@ -1654,7 +1676,8 @@ source_status() {
   printf 'Source MySQL worker-read status\n'
   printf 'host=%s\n' "${SOURCE_MYSQL_HOST}"
   printf 'port=%s\n' "${SOURCE_MYSQL_PORT}"
-  printf 'user=%s\n' "$(source_mysql_worker_user)"
+  printf 'worker_connector_user=%s\n' "$(source_mysql_worker_user)"
+  printf 'sudo_for_bulk_loader=%s\n' "${SOURCE_MYSQL_SUDO}"
   printf 'database=%s\n' "${SOURCE_MYSQL_DATABASE}"
   printf 'password_set=%s\n' "$([[ -n "$(source_mysql_worker_password)" ]] && printf yes || printf no)"
 
@@ -2022,10 +2045,19 @@ opensearch_full_index_sql_file=${OPENSEARCH_FULL_INDEX_SQL_FILE}
 indexer_schema_file=${INDEXER_SCHEMA_FILE}
 log_file=${LOG_FILE}
 log_dir=$(service_log_dir)
+worker_poll_interval_seconds=${WORKER_POLL_INTERVAL_SECONDS}
+worker_batch_delay_seconds=${WORKER_BATCH_DELAY_SECONDS}
 worker_batch_size=${WORKER_BATCH_SIZE}
 worker_claim_strategy=${WORKER_CLAIM_STRATEGY}
+worker_retry_delay_seconds=${WORKER_RETRY_DELAY_SECONDS}
 worker_max_retries=${WORKER_MAX_RETRIES}
 job_cleanup_batch_size=${JOB_CLEANUP_BATCH_SIZE}
+db_retry_attempts=${DB_RETRY_ATTEMPTS}
+db_retry_base_delay_seconds=${DB_RETRY_BASE_DELAY_SECONDS}
+db_retry_max_delay_seconds=${DB_RETRY_MAX_DELAY_SECONDS}
+reaper_poll_interval_seconds=${REAPER_POLL_INTERVAL_SECONDS}
+reaper_batch_delay_seconds=${REAPER_BATCH_DELAY_SECONDS}
+reaper_batch_size=${REAPER_BATCH_SIZE}
 reaper_stale_seconds=${REAPER_STALE_SECONDS}
 reaper_release_delay_seconds=${REAPER_RELEASE_DELAY_SECONDS}
 worker_template=$(worker_template_unit)
@@ -2178,11 +2210,11 @@ doctor_check_password() {
   fi
 
   if [[ "${SOURCE_MYSQL_SUDO}" == "1" || "${SOURCE_MYSQL_SUDO}" == "true" || "${SOURCE_MYSQL_SUDO}" == "yes" ]]; then
-    printf 'ok   SOURCE_MYSQL_SUDO enabled for source DB reads\n'
+    printf 'ok   SOURCE_MYSQL_SUDO enabled for bulk loader source DB reads\n'
   elif [[ -n "${SOURCE_MYSQL_USER}" ]]; then
     printf 'ok   SOURCE_MYSQL_USER is set\n'
   else
-    printf 'warn SOURCE_MYSQL_USER is empty; loader requires SOURCE_MYSQL_USER or SOURCE_MYSQL_SUDO=1\n'
+    printf 'warn SOURCE_MYSQL_USER is empty; bulk loader requires SOURCE_MYSQL_USER or SOURCE_MYSQL_SUDO=1\n'
   fi
 }
 

@@ -1,5 +1,11 @@
 # PA Services
 
+Version: 1.0.0
+
+Author: Konstantinos Chantzis
+
+Development assistance: OpenAI Codex
+
 This repository contains the operational services that keep the feed experience aligned with the source-of-truth data:
 
 - The OpenSearch indexer service consumes queue jobs, rebuilds campaign-action documents from MySQL, and upserts or deletes them in OpenSearch.
